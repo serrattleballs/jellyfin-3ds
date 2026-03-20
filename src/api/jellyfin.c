@@ -1,0 +1,607 @@
+/**
+ * jellyfin.c - Jellyfin REST API client implementation
+ *
+ * Reference: Switchfin (github.com/dragonflylee/switchfin)
+ * Reference: https://jmshrv.com/posts/jellyfin-api/
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <curl/curl.h>
+
+#include "api/jellyfin.h"
+#include "api/cJSON.h"
+
+/* ── Internal state ────────────────────────────────────────────────── */
+
+static CURL *s_curl = NULL;
+static char  s_user_agent[256];
+
+/* ── cURL helpers ──────────────────────────────────────────────────── */
+
+typedef struct {
+    char  *data;
+    size_t size;
+    size_t capacity;
+} response_buf_t;
+
+static size_t write_callback(void *ptr, size_t size, size_t nmemb, void *userdata)
+{
+    response_buf_t *buf = (response_buf_t *)userdata;
+    size_t total = size * nmemb;
+
+    if (buf->size + total >= buf->capacity) {
+        size_t new_cap = (buf->capacity + total) * 2;
+        char *new_data = realloc(buf->data, new_cap);
+        if (!new_data) return 0;
+        buf->data = new_data;
+        buf->capacity = new_cap;
+    }
+
+    memcpy(buf->data + buf->size, ptr, total);
+    buf->size += total;
+    buf->data[buf->size] = '\0';
+    return total;
+}
+
+static response_buf_t response_buf_new(void)
+{
+    response_buf_t buf = {0};
+    buf.capacity = 4096;
+    buf.data = malloc(buf.capacity);
+    if (buf.data) buf.data[0] = '\0';
+    return buf;
+}
+
+static void response_buf_free(response_buf_t *buf)
+{
+    free(buf->data);
+    buf->data = NULL;
+    buf->size = 0;
+    buf->capacity = 0;
+}
+
+/**
+ * Build the MediaBrowser authorization header.
+ * Format: MediaBrowser Client="Jellyfin 3DS", Device="3DS", DeviceId="...", Version="0.1.0"[, Token="..."]
+ */
+static void build_auth_header(const jfin_session_t *session, char *out, int out_len)
+{
+    if (session && session->access_token[0] != '\0') {
+        snprintf(out, out_len,
+            "MediaBrowser Client=\"Jellyfin 3DS\", Device=\"Nintendo 3DS\", "
+            "DeviceId=\"%s\", Version=\"" JFIN_VERSION "\", Token=\"%s\"",
+            session->device_id, session->access_token);
+    } else {
+        snprintf(out, out_len,
+            "MediaBrowser Client=\"Jellyfin 3DS\", Device=\"Nintendo 3DS\", "
+            "DeviceId=\"%s\", Version=\"" JFIN_VERSION "\"",
+            session ? session->device_id : "unknown");
+    }
+}
+
+/**
+ * Perform an HTTP GET request. Returns parsed cJSON object or NULL.
+ * Caller must cJSON_Delete() the result.
+ */
+static cJSON *api_get(const jfin_session_t *session, const char *url)
+{
+    if (!s_curl) return NULL;
+
+    response_buf_t resp = response_buf_new();
+    if (!resp.data) return NULL;
+
+    char auth_header[512];
+    build_auth_header(session, auth_header, sizeof(auth_header));
+
+    char auth_full[600];
+    snprintf(auth_full, sizeof(auth_full), "Authorization: %s", auth_header);
+
+    struct curl_slist *headers = NULL;
+    headers = curl_slist_append(headers, auth_full);
+    headers = curl_slist_append(headers, "Accept: application/json");
+
+    curl_easy_reset(s_curl);
+    curl_easy_setopt(s_curl, CURLOPT_URL, url);
+    curl_easy_setopt(s_curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(s_curl, CURLOPT_WRITEFUNCTION, write_callback);
+    curl_easy_setopt(s_curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(s_curl, CURLOPT_USERAGENT, s_user_agent);
+    curl_easy_setopt(s_curl, CURLOPT_TIMEOUT, 15L);
+    curl_easy_setopt(s_curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(s_curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(s_curl, CURLOPT_SSL_VERIFYPEER, 0L); /* 3DS has no CA store */
+
+    CURLcode res = curl_easy_perform(s_curl);
+    curl_slist_free_all(headers);
+
+    if (res != CURLE_OK) {
+        printf("API GET error: %s\n", curl_easy_strerror(res));
+        response_buf_free(&resp);
+        return NULL;
+    }
+
+    long http_code = 0;
+    curl_easy_getinfo(s_curl, CURLINFO_RESPONSE_CODE, &http_code);
+    if (http_code < 200 || http_code >= 300) {
+        printf("API GET %ld: %s\n", http_code, url);
+        response_buf_free(&resp);
+        return NULL;
+    }
+
+    cJSON *json = cJSON_Parse(resp.data);
+    response_buf_free(&resp);
+    return json;
+}
+
+/**
+ * Perform an HTTP POST request with JSON body.
+ * Returns parsed cJSON object or NULL.
+ */
+static cJSON *api_post(const jfin_session_t *session, const char *url,
+                       const char *json_body)
+{
+    if (!s_curl) return NULL;
+
+    response_buf_t resp = response_buf_new();
+    if (!resp.data) return NULL;
+
+    char auth_header[512];
+    build_auth_header(session, auth_header, sizeof(auth_header));
+
+    char auth_full[600];
+    snprintf(auth_full, sizeof(auth_full), "Authorization: %s", auth_header);
+
+    struct curl_slist *headers = NULL;
+    headers = curl_slist_append(headers, auth_full);
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    headers = curl_slist_append(headers, "Accept: application/json");
+
+    curl_easy_reset(s_curl);
+    curl_easy_setopt(s_curl, CURLOPT_URL, url);
+    curl_easy_setopt(s_curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(s_curl, CURLOPT_POSTFIELDS, json_body ? json_body : "");
+    curl_easy_setopt(s_curl, CURLOPT_WRITEFUNCTION, write_callback);
+    curl_easy_setopt(s_curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(s_curl, CURLOPT_USERAGENT, s_user_agent);
+    curl_easy_setopt(s_curl, CURLOPT_TIMEOUT, 15L);
+    curl_easy_setopt(s_curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(s_curl, CURLOPT_SSL_VERIFYPEER, 0L);
+
+    CURLcode res = curl_easy_perform(s_curl);
+    curl_slist_free_all(headers);
+
+    if (res != CURLE_OK) {
+        printf("API POST error: %s\n", curl_easy_strerror(res));
+        response_buf_free(&resp);
+        return NULL;
+    }
+
+    long http_code = 0;
+    curl_easy_getinfo(s_curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+    cJSON *json = NULL;
+    if (resp.size > 0)
+        json = cJSON_Parse(resp.data);
+
+    response_buf_free(&resp);
+
+    if (http_code < 200 || http_code >= 300) {
+        printf("API POST %ld: %s\n", http_code, url);
+        if (json) cJSON_Delete(json);
+        return NULL;
+    }
+
+    return json;
+}
+
+/* ── JSON parsing helpers ──────────────────────────────────────────── */
+
+static void json_get_string(const cJSON *obj, const char *key, char *out, int out_len)
+{
+    const cJSON *val = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (cJSON_IsString(val) && val->valuestring) {
+        strncpy(out, val->valuestring, out_len - 1);
+        out[out_len - 1] = '\0';
+    } else {
+        out[0] = '\0';
+    }
+}
+
+static int json_get_int(const cJSON *obj, const char *key, int fallback)
+{
+    const cJSON *val = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (cJSON_IsNumber(val)) return val->valueint;
+    return fallback;
+}
+
+static int64_t json_get_int64(const cJSON *obj, const char *key, int64_t fallback)
+{
+    const cJSON *val = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (cJSON_IsNumber(val)) return (int64_t)val->valuedouble;
+    return fallback;
+}
+
+static jfin_item_type_t parse_item_type(const char *type_str)
+{
+    if (!type_str) return JFIN_ITEM_UNKNOWN;
+    if (strcmp(type_str, "CollectionFolder") == 0) return JFIN_ITEM_FOLDER;
+    if (strcmp(type_str, "Folder") == 0) return JFIN_ITEM_FOLDER;
+    if (strcmp(type_str, "MusicAlbum") == 0) return JFIN_ITEM_MUSIC_ALBUM;
+    if (strcmp(type_str, "MusicArtist") == 0) return JFIN_ITEM_MUSIC_ARTIST;
+    if (strcmp(type_str, "Audio") == 0) return JFIN_ITEM_AUDIO;
+    if (strcmp(type_str, "Movie") == 0) return JFIN_ITEM_MOVIE;
+    if (strcmp(type_str, "Series") == 0) return JFIN_ITEM_SERIES;
+    if (strcmp(type_str, "Season") == 0) return JFIN_ITEM_SEASON;
+    if (strcmp(type_str, "Episode") == 0) return JFIN_ITEM_EPISODE;
+    return JFIN_ITEM_UNKNOWN;
+}
+
+static void parse_item(const cJSON *obj, jfin_item_t *item)
+{
+    memset(item, 0, sizeof(*item));
+    json_get_string(obj, "Id", item->id, sizeof(item->id));
+    json_get_string(obj, "Name", item->name, sizeof(item->name));
+    json_get_string(obj, "Album", item->album, sizeof(item->album));
+    json_get_string(obj, "SeriesName", item->series_name, sizeof(item->series_name));
+    item->year = json_get_int(obj, "ProductionYear", 0);
+    item->index_number = json_get_int(obj, "IndexNumber", 0);
+    item->runtime_ticks = json_get_int64(obj, "RunTimeTicks", 0);
+
+    /* Artist can be in AlbumArtist or Artists array */
+    json_get_string(obj, "AlbumArtist", item->artist, sizeof(item->artist));
+    if (item->artist[0] == '\0') {
+        const cJSON *artists = cJSON_GetObjectItemCaseSensitive(obj, "Artists");
+        if (cJSON_IsArray(artists) && cJSON_GetArraySize(artists) > 0) {
+            const cJSON *first = cJSON_GetArrayItem(artists, 0);
+            if (cJSON_IsString(first) && first->valuestring)
+                strncpy(item->artist, first->valuestring, sizeof(item->artist) - 1);
+        }
+    }
+
+    const cJSON *type = cJSON_GetObjectItemCaseSensitive(obj, "Type");
+    item->type = parse_item_type(cJSON_IsString(type) ? type->valuestring : NULL);
+
+    const cJSON *image_tags = cJSON_GetObjectItemCaseSensitive(obj, "ImageTags");
+    item->has_primary_image = (image_tags &&
+        cJSON_GetObjectItemCaseSensitive(image_tags, "Primary") != NULL);
+}
+
+static void parse_item_list(const cJSON *json, jfin_item_list_t *list)
+{
+    memset(list, 0, sizeof(*list));
+
+    const cJSON *items = cJSON_GetObjectItemCaseSensitive(json, "Items");
+    if (!cJSON_IsArray(items)) return;
+
+    list->total_count = json_get_int(json, "TotalRecordCount", 0);
+    list->start_index = json_get_int(json, "StartIndex", 0);
+
+    int count = cJSON_GetArraySize(items);
+    if (count > JFIN_MAX_ITEMS) count = JFIN_MAX_ITEMS;
+
+    for (int i = 0; i < count; i++) {
+        parse_item(cJSON_GetArrayItem(items, i), &list->items[i]);
+    }
+    list->count = count;
+}
+
+/* ── Public API ────────────────────────────────────────────────────── */
+
+bool jfin_init(void)
+{
+    if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
+        return false;
+
+    s_curl = curl_easy_init();
+    if (!s_curl) return false;
+
+    snprintf(s_user_agent, sizeof(s_user_agent),
+             "Jellyfin-3DS/" JFIN_VERSION " (Nintendo 3DS; ARM11)");
+
+    return true;
+}
+
+void jfin_cleanup(void)
+{
+    if (s_curl) {
+        curl_easy_cleanup(s_curl);
+        s_curl = NULL;
+    }
+    curl_global_cleanup();
+}
+
+bool jfin_login(jfin_session_t *session, const char *server_url,
+                const char *username, const char *password)
+{
+    memset(session, 0, sizeof(*session));
+    strncpy(session->server_url, server_url, sizeof(session->server_url) - 1);
+    strncpy(session->device_id, "3ds-jellyfin-001", sizeof(session->device_id) - 1);
+
+    /* Remove trailing slash */
+    int len = strlen(session->server_url);
+    if (len > 0 && session->server_url[len - 1] == '/')
+        session->server_url[len - 1] = '\0';
+
+    char url[JFIN_MAX_URL];
+    snprintf(url, sizeof(url), "%s/Users/AuthenticateByName", session->server_url);
+
+    /* Build login JSON */
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "Username", username);
+    cJSON_AddStringToObject(body, "Pw", password);
+    char *body_str = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+
+    cJSON *resp = api_post(session, url, body_str);
+    free(body_str);
+
+    if (!resp) return false;
+
+    json_get_string(resp, "AccessToken", session->access_token, sizeof(session->access_token));
+
+    const cJSON *user = cJSON_GetObjectItemCaseSensitive(resp, "User");
+    if (user) {
+        json_get_string(user, "Id", session->user_id, sizeof(session->user_id));
+    }
+
+    /* Get server name */
+    json_get_string(resp, "ServerId", session->server_name, sizeof(session->server_name));
+
+    cJSON_Delete(resp);
+
+    session->authenticated = (session->access_token[0] != '\0' &&
+                              session->user_id[0] != '\0');
+
+    if (session->authenticated)
+        printf("Logged in as %s\n", username);
+    else
+        printf("Login failed for %s\n", username);
+
+    return session->authenticated;
+}
+
+void jfin_logout(jfin_session_t *session)
+{
+    if (!session->authenticated) return;
+
+    char url[JFIN_MAX_URL];
+    snprintf(url, sizeof(url), "%s/Sessions/Logout", session->server_url);
+    cJSON *resp = api_post(session, url, NULL);
+    if (resp) cJSON_Delete(resp);
+
+    memset(session->access_token, 0, sizeof(session->access_token));
+    session->authenticated = false;
+}
+
+bool jfin_get_views(const jfin_session_t *session, jfin_item_list_t *out)
+{
+    char url[JFIN_MAX_URL];
+    snprintf(url, sizeof(url), "%s/Users/%s/Views",
+             session->server_url, session->user_id);
+
+    cJSON *json = api_get(session, url);
+    if (!json) return false;
+
+    parse_item_list(json, out);
+    cJSON_Delete(json);
+    return true;
+}
+
+bool jfin_get_items(const jfin_session_t *session, const char *parent_id,
+                    int start_index, int limit, jfin_item_list_t *out)
+{
+    char url[JFIN_MAX_URL];
+    snprintf(url, sizeof(url),
+             "%s/Users/%s/Items?ParentId=%s&StartIndex=%d&Limit=%d"
+             "&SortBy=SortName&SortOrder=Ascending"
+             "&Fields=PrimaryImageAspectRatio,BasicSyncInfo",
+             session->server_url, session->user_id, parent_id,
+             start_index, limit);
+
+    cJSON *json = api_get(session, url);
+    if (!json) return false;
+
+    parse_item_list(json, out);
+    out->start_index = start_index;
+    cJSON_Delete(json);
+    return true;
+}
+
+bool jfin_get_resume(const jfin_session_t *session, jfin_item_list_t *out)
+{
+    char url[JFIN_MAX_URL];
+    snprintf(url, sizeof(url),
+             "%s/Users/%s/Items/Resume?Limit=%d&Fields=PrimaryImageAspectRatio",
+             session->server_url, session->user_id, JFIN_MAX_ITEMS);
+
+    cJSON *json = api_get(session, url);
+    if (!json) return false;
+
+    parse_item_list(json, out);
+    cJSON_Delete(json);
+    return true;
+}
+
+bool jfin_get_latest(const jfin_session_t *session, const char *parent_id,
+                     int limit, jfin_item_list_t *out)
+{
+    char url[JFIN_MAX_URL];
+    snprintf(url, sizeof(url),
+             "%s/Users/%s/Items/Latest?ParentId=%s&Limit=%d"
+             "&Fields=PrimaryImageAspectRatio",
+             session->server_url, session->user_id, parent_id, limit);
+
+    /* /Latest returns a flat array, not {Items: [...]} */
+    cJSON *json = api_get(session, url);
+    if (!json) return false;
+
+    memset(out, 0, sizeof(*out));
+
+    if (cJSON_IsArray(json)) {
+        int count = cJSON_GetArraySize(json);
+        if (count > JFIN_MAX_ITEMS) count = JFIN_MAX_ITEMS;
+        for (int i = 0; i < count; i++) {
+            parse_item(cJSON_GetArrayItem(json, i), &out->items[i]);
+        }
+        out->count = count;
+        out->total_count = count;
+    }
+
+    cJSON_Delete(json);
+    return true;
+}
+
+bool jfin_search(const jfin_session_t *session, const char *query,
+                 int limit, jfin_item_list_t *out)
+{
+    /* URL-encode the query (minimal: spaces only for now) */
+    char encoded[256] = {0};
+    int j = 0;
+    for (int i = 0; query[i] && j < (int)sizeof(encoded) - 4; i++) {
+        if (query[i] == ' ') {
+            encoded[j++] = '%';
+            encoded[j++] = '2';
+            encoded[j++] = '0';
+        } else {
+            encoded[j++] = query[i];
+        }
+    }
+
+    char url[JFIN_MAX_URL];
+    snprintf(url, sizeof(url),
+             "%s/Users/%s/Items?SearchTerm=%s&Limit=%d&Recursive=true"
+             "&Fields=PrimaryImageAspectRatio",
+             session->server_url, session->user_id, encoded, limit);
+
+    cJSON *json = api_get(session, url);
+    if (!json) return false;
+
+    parse_item_list(json, out);
+    cJSON_Delete(json);
+    return true;
+}
+
+bool jfin_get_audio_stream(const jfin_session_t *session, const char *item_id,
+                           jfin_stream_t *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    /*
+     * Use the /Audio/{id}/universal endpoint which handles transcoding
+     * negotiation automatically. Request MP3 for maximum compatibility
+     * with the 3DS's limited CPU.
+     */
+    snprintf(out->url, sizeof(out->url),
+             "%s/Audio/%s/universal?UserId=%s&DeviceId=%s"
+             "&MaxStreamingBitrate=128000"
+             "&Container=mp3,opus,ogg,aac"
+             "&AudioCodec=mp3"
+             "&TranscodingContainer=mp3"
+             "&TranscodingProtocol=http"
+             "&api_key=%s",
+             session->server_url, item_id, session->user_id,
+             session->device_id, session->access_token);
+
+    strncpy(out->container, "mp3", sizeof(out->container) - 1);
+    out->is_transcoding = true; /* server decides; assume yes */
+
+    return true;
+}
+
+bool jfin_get_video_stream(const jfin_session_t *session, const char *item_id,
+                           jfin_stream_t *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    /*
+     * Request H.264 Baseline at 400x240 for the 3DS top screen.
+     * Low bitrate to stay within WiFi bandwidth.
+     * No B-frames for MVD hardware decoder compatibility.
+     */
+    snprintf(out->url, sizeof(out->url),
+             "%s/Videos/%s/stream?UserId=%s&DeviceId=%s"
+             "&VideoCodec=h264"
+             "&AudioCodec=aac"
+             "&MaxWidth=400&MaxHeight=240"
+             "&VideoBitRate=800000"
+             "&AudioBitRate=128000"
+             "&MaxAudioChannels=2"
+             "&Container=ts"
+             "&Profile=Baseline"
+             "&Level=31"
+             "&api_key=%s",
+             session->server_url, item_id, session->user_id,
+             session->device_id, session->access_token);
+
+    strncpy(out->container, "ts", sizeof(out->container) - 1);
+    out->is_transcoding = true;
+
+    return true;
+}
+
+void jfin_get_image_url(const jfin_session_t *session, const char *item_id,
+                        int max_width, int max_height,
+                        char *url_out, int url_out_len)
+{
+    snprintf(url_out, url_out_len,
+             "%s/Items/%s/Images/Primary?maxWidth=%d&maxHeight=%d&format=Jpg&quality=80",
+             session->server_url, item_id, max_width, max_height);
+}
+
+bool jfin_report_start(const jfin_session_t *session, const char *item_id)
+{
+    char url[JFIN_MAX_URL];
+    snprintf(url, sizeof(url), "%s/Sessions/Playing", session->server_url);
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "ItemId", item_id);
+    char *body_str = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+
+    cJSON *resp = api_post(session, url, body_str);
+    free(body_str);
+    if (resp) cJSON_Delete(resp);
+
+    return true; /* reporting is best-effort */
+}
+
+bool jfin_report_progress(const jfin_session_t *session, const char *item_id,
+                          int64_t position_ticks, bool is_paused)
+{
+    char url[JFIN_MAX_URL];
+    snprintf(url, sizeof(url), "%s/Sessions/Playing/Progress", session->server_url);
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "ItemId", item_id);
+    cJSON_AddNumberToObject(body, "PositionTicks", (double)position_ticks);
+    cJSON_AddBoolToObject(body, "IsPaused", is_paused);
+    char *body_str = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+
+    cJSON *resp = api_post(session, url, body_str);
+    free(body_str);
+    if (resp) cJSON_Delete(resp);
+
+    return true;
+}
+
+bool jfin_report_stop(const jfin_session_t *session, const char *item_id,
+                      int64_t position_ticks)
+{
+    char url[JFIN_MAX_URL];
+    snprintf(url, sizeof(url), "%s/Sessions/Playing/Stopped", session->server_url);
+
+    cJSON *body = cJSON_CreateObject();
+    cJSON_AddStringToObject(body, "ItemId", item_id);
+    cJSON_AddNumberToObject(body, "PositionTicks", (double)position_ticks);
+    char *body_str = cJSON_PrintUnformatted(body);
+    cJSON_Delete(body);
+
+    cJSON *resp = api_post(session, url, body_str);
+    free(body_str);
+    if (resp) cJSON_Delete(resp);
+
+    return true;
+}

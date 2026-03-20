@@ -1,0 +1,133 @@
+/**
+ * ui.h - Dual-screen UI system
+ *
+ * Top screen (400x240): now-playing info, album art, server branding
+ * Bottom screen (320x240): touch-driven list navigation, controls
+ *
+ * Uses citro2d for GPU-accelerated 2D rendering.
+ */
+
+#ifndef JFIN_UI_H
+#define JFIN_UI_H
+
+#include <stdbool.h>
+#include <3ds.h>
+#include "api/jellyfin.h"
+#include "audio/player.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define TOP_SCREEN_WIDTH    400
+#define TOP_SCREEN_HEIGHT   240
+#define BOTTOM_SCREEN_WIDTH 320
+#define BOTTOM_SCREEN_HEIGHT 240
+
+#define UI_LIST_ITEM_HEIGHT  40
+#define UI_MAX_VISIBLE_ITEMS  6  /* 240 / 40 = 6 items on bottom screen */
+#define UI_FONT_SIZE         14
+#define UI_FONT_SIZE_SMALL   11
+
+/* ── Colors (RGBA8) ──────────────────────────────────────────────── */
+#define COLOR_BG_DARK       0x1A1A2EFF
+#define COLOR_BG_CARD       0x16213EFF
+#define COLOR_PRIMARY       0x00A8E8FF
+#define COLOR_TEXT_PRIMARY   0xE0E0E0FF
+#define COLOR_TEXT_SECONDARY 0x888888FF
+#define COLOR_ACCENT         0x7B2CBFFF
+#define COLOR_HIGHLIGHT      0x00A8E840  /* semi-transparent selection */
+
+/* ── Screens / Views ─────────────────────────────────────────────── */
+
+typedef enum {
+    VIEW_LOGIN,          /* server URL + credentials input */
+    VIEW_LIBRARIES,      /* top-level library list */
+    VIEW_BROWSE,         /* browsing items within a library */
+    VIEW_NOW_PLAYING,    /* audio playback screen */
+} ui_view_t;
+
+/* ── UI State ────────────────────────────────────────────────────── */
+
+typedef struct {
+    /* Navigation */
+    ui_view_t    current_view;
+    ui_view_t    previous_view;
+
+    /* List state */
+    jfin_item_list_t items;
+    int          selected_index;   /* cursor position in list */
+    int          scroll_offset;    /* first visible item index */
+
+    /* Breadcrumb for back navigation */
+    char         parent_stack_ids[8][JFIN_MAX_ID];
+    char         parent_stack_names[8][JFIN_MAX_NAME];
+    int          parent_depth;
+
+    /* Now playing */
+    jfin_item_t  now_playing;
+    bool         has_now_playing;
+
+    /* Login form */
+    char         server_url[JFIN_MAX_URL];
+    char         username[64];
+    char         password[64];
+    int          login_field;  /* 0=url, 1=user, 2=pass */
+
+    /* Touch state */
+    bool         touch_held;
+    int          touch_start_y;
+    int          scroll_velocity;
+} ui_state_t;
+
+/* ── Lifecycle ───────────────────────────────────────────────────── */
+
+/**
+ * Initialize the UI subsystem. Call after gfxInitDefault() and C2D_Init().
+ */
+bool ui_init(void);
+
+/**
+ * Shut down the UI subsystem.
+ */
+void ui_cleanup(void);
+
+/* ── Frame Loop ──────────────────────────────────────────────────── */
+
+/**
+ * Process input (buttons + touch) and update UI state.
+ */
+void ui_update(ui_state_t *state, const jfin_session_t *session,
+               u32 kdown, u32 kheld, touchPosition touch);
+
+/**
+ * Render both screens for the current frame.
+ */
+void ui_render(const ui_state_t *state, const jfin_session_t *session,
+               const player_status_t *player);
+
+/* ── View-Specific Renderers ─────────────────────────────────────── */
+
+void ui_render_login(const ui_state_t *state);
+void ui_render_libraries(const ui_state_t *state);
+void ui_render_browse(const ui_state_t *state);
+void ui_render_now_playing(const ui_state_t *state, const player_status_t *player);
+
+/* ── Helpers ─────────────────────────────────────────────────────── */
+
+/**
+ * Navigate into an item (push to breadcrumb stack, load children).
+ */
+void ui_navigate_into(ui_state_t *state, const jfin_session_t *session,
+                      const jfin_item_t *item);
+
+/**
+ * Go back one level in the breadcrumb stack.
+ */
+void ui_navigate_back(ui_state_t *state, const jfin_session_t *session);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* JFIN_UI_H */

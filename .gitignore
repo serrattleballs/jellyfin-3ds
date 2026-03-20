@@ -1,0 +1,15 @@
+build/
+*.3dsx
+*.elf
+*.smdh
+*.map
+*.d
+*.o
+
+# IDE
+.vscode/
+.idea/
+compile_commands.json
+
+# macOS
+.DS_Store
