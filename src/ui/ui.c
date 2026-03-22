@@ -167,8 +167,16 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
         if (kdown & KEY_A) {
             if (state->selected_index < state->items.count) {
                 jfin_item_t *item = &state->items.items[state->selected_index];
-                if (item->type == JFIN_ITEM_AUDIO) {
-                    /* Play audio */
+                bool is_playable = (item->type == JFIN_ITEM_AUDIO ||
+                                    item->type == JFIN_ITEM_MOVIE ||
+                                    item->type == JFIN_ITEM_EPISODE);
+                bool is_container = (item->type == JFIN_ITEM_FOLDER ||
+                                     item->type == JFIN_ITEM_MUSIC_ALBUM ||
+                                     item->type == JFIN_ITEM_MUSIC_ARTIST ||
+                                     item->type == JFIN_ITEM_SERIES ||
+                                     item->type == JFIN_ITEM_SEASON);
+                if (is_playable) {
+                    /* Play: audio for music, audio track for movies/episodes */
                     jfin_stream_t stream;
                     if (jfin_get_audio_stream(session, item->id, &stream)) {
                         audio_player_play(stream.url, item->runtime_ticks);
@@ -176,9 +184,10 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                         state->has_now_playing = true;
                         jfin_report_start(session, item->id);
                     }
-                } else {
+                } else if (is_container) {
                     ui_navigate_into(state, session, item);
                 }
+                /* JFIN_ITEM_UNKNOWN: do nothing */
             }
         }
         /* B to go back */

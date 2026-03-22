@@ -106,6 +106,7 @@ static struct {
 
     /* Decode */
     mpg123_handle  *mpg;
+    long            sample_rate; /* actual rate from stream (44100 or 48000) */
 
     /* NDSP output */
     int             ndsp_channel;
@@ -194,7 +195,13 @@ static int feed_and_decode(s16 *out_buf, int max_samples)
         long rate;
         int channels, encoding;
         mpg123_getformat(s_player.mpg, &rate, &channels, &encoding);
-        printf("Audio: %ldHz %dch\n", rate, channels);
+
+        /* Update NDSP sample rate to match the actual stream */
+        if (rate != s_player.sample_rate && rate > 0) {
+            s_player.sample_rate = rate;
+            ndspChnSetRate(s_player.ndsp_channel, (float)rate);
+        }
+
         /* Re-read after format change */
         err = mpg123_read(s_player.mpg, (unsigned char *)out_buf,
                           max_samples * sizeof(s16) * AUDIO_CHANNELS, &decoded);
@@ -212,6 +219,29 @@ static void decode_thread_func(void *arg)
         if (s_player.ring.fill >= (int)AUDIO_PREFETCH_BYTES || s_player.ring.finished)
             break;
         svcSleepThread(10000000LL); /* 10ms */
+    }
+
+    if (s_player.stop_requested) return;
+
+    /* Probe stream format before queuing any audio.
+     * Feed data until mpg123 reports the format, then set NDSP rate. */
+    while (!s_player.stop_requested) {
+        u8 probe_buf[4096];
+        int avail = ring_read(&s_player.ring, probe_buf, sizeof(probe_buf));
+        if (avail > 0)
+            mpg123_feed(s_player.mpg, probe_buf, avail);
+
+        long rate;
+        int channels, encoding;
+        int ret = mpg123_getformat(s_player.mpg, &rate, &channels, &encoding);
+        if (ret == MPG123_OK && rate > 0) {
+            s_player.sample_rate = rate;
+            ndspChnSetRate(s_player.ndsp_channel, (float)rate);
+            break;
+        }
+        if (s_player.ring.finished && s_player.ring.fill == 0)
+            break;
+        svcSleepThread(5000000LL); /* 5ms */
     }
 
     if (s_player.stop_requested) return;
@@ -248,8 +278,9 @@ static void decode_thread_func(void *arg)
 
         s_player.active_buf = (s_player.active_buf + 1) % AUDIO_NUM_BUFFERS;
 
-        /* Update position estimate */
-        s_player.position_ticks += (int64_t)samples * 10000000LL / AUDIO_SAMPLE_RATE;
+        /* Update position estimate using actual sample rate */
+        long rate = s_player.sample_rate ? s_player.sample_rate : AUDIO_SAMPLE_RATE;
+        s_player.position_ticks += (int64_t)samples * 10000000LL / rate;
     }
 
     if (!s_player.stop_requested) {
@@ -327,6 +358,7 @@ bool audio_player_play(const char *url, int64_t duration_ticks)
     s_player.error_msg[0] = '\0';
     s_player.stop_requested = false;
     s_player.active_buf = 0;
+    s_player.sample_rate = AUDIO_SAMPLE_RATE;
     s_player.state = PLAYER_LOADING;
 
     /* Reset decoder */

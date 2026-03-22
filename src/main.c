@@ -32,7 +32,6 @@ static void init_services(void)
     /* Core 3DS services */
     gfxInitDefault();
     gfxSet3D(false); /* no stereoscopic 3D needed */
-    consoleInit(GFX_BOTTOM, NULL); /* temporary: debug console on bottom */
 
     /* Networking */
     u32 *soc_buf = (u32 *)memalign(0x1000, 0x100000); /* 1MB socket buffer */
@@ -80,27 +79,14 @@ int main(int argc, char *argv[])
 {
     init_services();
 
-    printf("Jellyfin 3DS v" JFIN_VERSION "\n");
-    printf("Initializing...\n");
-
     /* Load config */
     config_load(&s_config);
     config_ensure_device_id(&s_config);
 
-    /* Init subsystems */
-    if (!jfin_init()) {
-        printf("ERROR: Failed to init API client\n");
-        goto error_wait;
-    }
-
-    if (!audio_player_init()) {
-        printf("ERROR: Failed to init audio player\n");
-        goto error_wait;
-    }
-
-    if (!ui_init()) {
-        printf("ERROR: Failed to init UI\n");
-        goto error_wait;
+    /* Init subsystems — if any fail, exit gracefully */
+    if (!jfin_init() || !audio_player_init() || !ui_init()) {
+        cleanup_services();
+        return 1;
     }
 
     /* Try restoring previous session */
@@ -109,7 +95,6 @@ int main(int argc, char *argv[])
 
     if (try_auto_login()) {
         s_ui.current_view = VIEW_LIBRARIES;
-        printf("Restored session for %s\n", s_config.server_url);
     } else {
         s_ui.current_view = VIEW_LOGIN;
         /* Pre-fill server URL from config if available */
@@ -159,15 +144,4 @@ int main(int argc, char *argv[])
     cleanup_services();
 
     return 0;
-
-error_wait:
-    printf("\nPress START to exit.\n");
-    while (aptMainLoop()) {
-        hidScanInput();
-        if (hidKeysDown() & KEY_START)
-            break;
-        gspWaitForVBlank();
-    }
-    cleanup_services();
-    return 1;
 }
