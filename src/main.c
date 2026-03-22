@@ -13,6 +13,7 @@
 #include <citro2d.h>
 #include <string.h>
 #include <stdio.h>
+#include <malloc.h>
 
 #include "api/jellyfin.h"
 #include "audio/player.h"
@@ -65,10 +66,10 @@ static bool try_auto_login(void)
         return false;
 
     /* Restore session from saved config */
-    strncpy(s_session.server_url, s_config.server_url, sizeof(s_session.server_url) - 1);
-    strncpy(s_session.access_token, s_config.access_token, sizeof(s_session.access_token) - 1);
-    strncpy(s_session.user_id, s_config.user_id, sizeof(s_session.user_id) - 1);
-    strncpy(s_session.device_id, s_config.device_id, sizeof(s_session.device_id) - 1);
+    snprintf(s_session.server_url, sizeof(s_session.server_url), "%s", s_config.server_url);
+    snprintf(s_session.access_token, sizeof(s_session.access_token), "%s", s_config.access_token);
+    snprintf(s_session.user_id, sizeof(s_session.user_id), "%s", s_config.user_id);
+    snprintf(s_session.device_id, sizeof(s_session.device_id), "%s", s_config.device_id);
 
     /* TODO: validate token with GET /Users/{id} — for now assume valid */
     s_session.authenticated = true;
@@ -113,7 +114,7 @@ int main(int argc, char *argv[])
         s_ui.current_view = VIEW_LOGIN;
         /* Pre-fill server URL from config if available */
         if (s_config.server_url[0] != '\0')
-            strncpy(s_ui.server_url, s_config.server_url, sizeof(s_ui.server_url) - 1);
+            snprintf(s_ui.server_url, sizeof(s_ui.server_url), "%s", s_config.server_url);
     }
 
     /* ── Main Loop ─────────────────────────────────────────────────── */
@@ -146,8 +147,8 @@ int main(int argc, char *argv[])
 
     /* Save session for next launch */
     if (s_session.authenticated) {
-        strncpy(s_config.access_token, s_session.access_token, sizeof(s_config.access_token) - 1);
-        strncpy(s_config.user_id, s_session.user_id, sizeof(s_config.user_id) - 1);
+        snprintf(s_config.access_token, sizeof(s_config.access_token), "%s", s_session.access_token);
+        snprintf(s_config.user_id, sizeof(s_config.user_id), "%s", s_session.user_id);
         config_save(&s_config);
     }
 

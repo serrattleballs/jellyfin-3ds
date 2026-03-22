@@ -321,7 +321,7 @@ bool audio_player_play(const char *url, int64_t duration_ticks)
 {
     audio_player_stop(); /* stop any current playback */
 
-    strncpy(s_player.url, url, sizeof(s_player.url) - 1);
+    snprintf(s_player.url, sizeof(s_player.url), "%s", url);
     s_player.duration_ticks = duration_ticks;
     s_player.position_ticks = 0;
     s_player.error_msg[0] = '\0';
@@ -420,7 +420,7 @@ player_status_t audio_player_get_status(void)
     status.duration_ticks = s_player.duration_ticks;
     status.buffer_percent = (s_player.ring.data && RING_SIZE > 0)
         ? (s_player.ring.fill * 100 / RING_SIZE) : 0;
-    strncpy(status.error_msg, s_player.error_msg, sizeof(status.error_msg) - 1);
+    snprintf(status.error_msg, sizeof(status.error_msg), "%s", s_player.error_msg);
     LightLock_Unlock(&s_player.state_lock);
     return status;
 }

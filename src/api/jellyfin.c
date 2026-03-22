@@ -202,8 +202,7 @@ static void json_get_string(const cJSON *obj, const char *key, char *out, int ou
 {
     const cJSON *val = cJSON_GetObjectItemCaseSensitive(obj, key);
     if (cJSON_IsString(val) && val->valuestring) {
-        strncpy(out, val->valuestring, out_len - 1);
-        out[out_len - 1] = '\0';
+        snprintf(out, out_len, "%s", val->valuestring);
     } else {
         out[0] = '\0';
     }
@@ -227,6 +226,7 @@ static jfin_item_type_t parse_item_type(const char *type_str)
 {
     if (!type_str) return JFIN_ITEM_UNKNOWN;
     if (strcmp(type_str, "CollectionFolder") == 0) return JFIN_ITEM_FOLDER;
+    if (strcmp(type_str, "UserView") == 0) return JFIN_ITEM_FOLDER;
     if (strcmp(type_str, "Folder") == 0) return JFIN_ITEM_FOLDER;
     if (strcmp(type_str, "MusicAlbum") == 0) return JFIN_ITEM_MUSIC_ALBUM;
     if (strcmp(type_str, "MusicArtist") == 0) return JFIN_ITEM_MUSIC_ARTIST;
@@ -256,7 +256,7 @@ static void parse_item(const cJSON *obj, jfin_item_t *item)
         if (cJSON_IsArray(artists) && cJSON_GetArraySize(artists) > 0) {
             const cJSON *first = cJSON_GetArrayItem(artists, 0);
             if (cJSON_IsString(first) && first->valuestring)
-                strncpy(item->artist, first->valuestring, sizeof(item->artist) - 1);
+                snprintf(item->artist, sizeof(item->artist), "%s", first->valuestring);
         }
     }
 
@@ -266,6 +266,12 @@ static void parse_item(const cJSON *obj, jfin_item_t *item)
     const cJSON *image_tags = cJSON_GetObjectItemCaseSensitive(obj, "ImageTags");
     item->has_primary_image = (image_tags &&
         cJSON_GetObjectItemCaseSensitive(image_tags, "Primary") != NULL);
+
+    /* Album art fallback for audio tracks (which often lack their own image) */
+    json_get_string(obj, "AlbumId", item->album_id, sizeof(item->album_id));
+    const cJSON *album_tag = cJSON_GetObjectItemCaseSensitive(obj, "AlbumPrimaryImageTag");
+    item->has_album_image = (item->album_id[0] != '\0' &&
+        cJSON_IsString(album_tag) && album_tag->valuestring != NULL);
 }
 
 static void parse_item_list(const cJSON *json, jfin_item_list_t *list)
@@ -316,15 +322,15 @@ bool jfin_login(jfin_session_t *session, const char *server_url,
                 const char *username, const char *password)
 {
     memset(session, 0, sizeof(*session));
-    strncpy(session->server_url, server_url, sizeof(session->server_url) - 1);
-    strncpy(session->device_id, "3ds-jellyfin-001", sizeof(session->device_id) - 1);
+    snprintf(session->server_url, sizeof(session->server_url), "%s", server_url);
+    snprintf(session->device_id, sizeof(session->device_id), "%s", "3ds-jellyfin-001");
 
     /* Remove trailing slash */
     int len = strlen(session->server_url);
     if (len > 0 && session->server_url[len - 1] == '/')
         session->server_url[len - 1] = '\0';
 
-    char url[JFIN_MAX_URL];
+    char url[JFIN_URL_BUF];
     snprintf(url, sizeof(url), "%s/Users/AuthenticateByName", session->server_url);
 
     /* Build login JSON */
@@ -366,7 +372,7 @@ void jfin_logout(jfin_session_t *session)
 {
     if (!session->authenticated) return;
 
-    char url[JFIN_MAX_URL];
+    char url[JFIN_URL_BUF];
     snprintf(url, sizeof(url), "%s/Sessions/Logout", session->server_url);
     cJSON *resp = api_post(session, url, NULL);
     if (resp) cJSON_Delete(resp);
@@ -377,7 +383,7 @@ void jfin_logout(jfin_session_t *session)
 
 bool jfin_get_views(const jfin_session_t *session, jfin_item_list_t *out)
 {
-    char url[JFIN_MAX_URL];
+    char url[JFIN_URL_BUF];
     snprintf(url, sizeof(url), "%s/Users/%s/Views",
              session->server_url, session->user_id);
 
@@ -392,7 +398,7 @@ bool jfin_get_views(const jfin_session_t *session, jfin_item_list_t *out)
 bool jfin_get_items(const jfin_session_t *session, const char *parent_id,
                     int start_index, int limit, jfin_item_list_t *out)
 {
-    char url[JFIN_MAX_URL];
+    char url[JFIN_URL_BUF];
     snprintf(url, sizeof(url),
              "%s/Users/%s/Items?ParentId=%s&StartIndex=%d&Limit=%d"
              "&SortBy=SortName&SortOrder=Ascending"
@@ -411,7 +417,7 @@ bool jfin_get_items(const jfin_session_t *session, const char *parent_id,
 
 bool jfin_get_resume(const jfin_session_t *session, jfin_item_list_t *out)
 {
-    char url[JFIN_MAX_URL];
+    char url[JFIN_URL_BUF];
     snprintf(url, sizeof(url),
              "%s/Users/%s/Items/Resume?Limit=%d&Fields=PrimaryImageAspectRatio",
              session->server_url, session->user_id, JFIN_MAX_ITEMS);
@@ -427,7 +433,7 @@ bool jfin_get_resume(const jfin_session_t *session, jfin_item_list_t *out)
 bool jfin_get_latest(const jfin_session_t *session, const char *parent_id,
                      int limit, jfin_item_list_t *out)
 {
-    char url[JFIN_MAX_URL];
+    char url[JFIN_URL_BUF];
     snprintf(url, sizeof(url),
              "%s/Users/%s/Items/Latest?ParentId=%s&Limit=%d"
              "&Fields=PrimaryImageAspectRatio",
@@ -456,26 +462,18 @@ bool jfin_get_latest(const jfin_session_t *session, const char *parent_id,
 bool jfin_search(const jfin_session_t *session, const char *query,
                  int limit, jfin_item_list_t *out)
 {
-    /* URL-encode the query (minimal: spaces only for now) */
-    char encoded[256] = {0};
-    int j = 0;
-    for (int i = 0; query[i] && j < (int)sizeof(encoded) - 4; i++) {
-        if (query[i] == ' ') {
-            encoded[j++] = '%';
-            encoded[j++] = '2';
-            encoded[j++] = '0';
-        } else {
-            encoded[j++] = query[i];
-        }
-    }
+    /* URL-encode the query using libcurl */
+    char *encoded = curl_easy_escape(s_curl, query, 0);
+    if (!encoded) return false;
 
-    char url[JFIN_MAX_URL];
+    char url[JFIN_URL_BUF];
     snprintf(url, sizeof(url),
              "%s/Users/%s/Items?SearchTerm=%s&Limit=%d&Recursive=true"
              "&Fields=PrimaryImageAspectRatio",
              session->server_url, session->user_id, encoded, limit);
 
     cJSON *json = api_get(session, url);
+    curl_free(encoded);
     if (!json) return false;
 
     parse_item_list(json, out);
@@ -504,7 +502,7 @@ bool jfin_get_audio_stream(const jfin_session_t *session, const char *item_id,
              session->server_url, item_id, session->user_id,
              session->device_id, session->access_token);
 
-    strncpy(out->container, "mp3", sizeof(out->container) - 1);
+    snprintf(out->container, sizeof(out->container), "%s", "mp3");
     out->is_transcoding = true; /* server decides; assume yes */
 
     return true;
@@ -535,24 +533,30 @@ bool jfin_get_video_stream(const jfin_session_t *session, const char *item_id,
              session->server_url, item_id, session->user_id,
              session->device_id, session->access_token);
 
-    strncpy(out->container, "ts", sizeof(out->container) - 1);
+    snprintf(out->container, sizeof(out->container), "%s", "ts");
     out->is_transcoding = true;
 
     return true;
 }
 
-void jfin_get_image_url(const jfin_session_t *session, const char *item_id,
-                        int max_width, int max_height,
-                        char *url_out, int url_out_len)
+void jfin_get_image_url_for_item(const jfin_session_t *session,
+                                 const jfin_item_t *item,
+                                 int max_width, int max_height,
+                                 char *url_out, int url_out_len)
 {
+    /* Use the item's own image, or fall back to album art for audio tracks */
+    const char *image_item_id = item->id;
+    if (!item->has_primary_image && item->has_album_image)
+        image_item_id = item->album_id;
+
     snprintf(url_out, url_out_len,
              "%s/Items/%s/Images/Primary?maxWidth=%d&maxHeight=%d&format=Jpg&quality=80",
-             session->server_url, item_id, max_width, max_height);
+             session->server_url, image_item_id, max_width, max_height);
 }
 
 bool jfin_report_start(const jfin_session_t *session, const char *item_id)
 {
-    char url[JFIN_MAX_URL];
+    char url[JFIN_URL_BUF];
     snprintf(url, sizeof(url), "%s/Sessions/Playing", session->server_url);
 
     cJSON *body = cJSON_CreateObject();
@@ -570,7 +574,7 @@ bool jfin_report_start(const jfin_session_t *session, const char *item_id)
 bool jfin_report_progress(const jfin_session_t *session, const char *item_id,
                           int64_t position_ticks, bool is_paused)
 {
-    char url[JFIN_MAX_URL];
+    char url[JFIN_URL_BUF];
     snprintf(url, sizeof(url), "%s/Sessions/Playing/Progress", session->server_url);
 
     cJSON *body = cJSON_CreateObject();
@@ -590,7 +594,7 @@ bool jfin_report_progress(const jfin_session_t *session, const char *item_id,
 bool jfin_report_stop(const jfin_session_t *session, const char *item_id,
                       int64_t position_ticks)
 {
-    char url[JFIN_MAX_URL];
+    char url[JFIN_URL_BUF];
     snprintf(url, sizeof(url), "%s/Sessions/Playing/Stopped", session->server_url);
 
     cJSON *body = cJSON_CreateObject();

@@ -102,7 +102,7 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
         /* A to activate swkbd for the selected field */
         if (kdown & KEY_A) {
             SwkbdState swkbd;
-            char buf[256] = {0};
+            char buf[JFIN_MAX_URL] = {0};
 
             SwkbdType type = (state->login_field == 2)
                 ? SWKBD_TYPE_WESTERN : SWKBD_TYPE_WESTERN;
@@ -111,11 +111,11 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
             switch (state->login_field) {
             case 0:
                 swkbdSetHintText(&swkbd, "Server URL (e.g. http://192.168.1.100:8096)");
-                strncpy(buf, state->server_url, sizeof(buf) - 1);
+                snprintf(buf, sizeof(buf), "%s", state->server_url);
                 break;
             case 1:
                 swkbdSetHintText(&swkbd, "Username");
-                strncpy(buf, state->username, sizeof(buf) - 1);
+                snprintf(buf, sizeof(buf), "%s", state->username);
                 break;
             case 2:
                 swkbdSetHintText(&swkbd, "Password");
@@ -128,9 +128,9 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
 
             if (button == SWKBD_BUTTON_CONFIRM) {
                 switch (state->login_field) {
-                case 0: strncpy(state->server_url, buf, sizeof(state->server_url) - 1); break;
-                case 1: strncpy(state->username, buf, sizeof(state->username) - 1); break;
-                case 2: strncpy(state->password, buf, sizeof(state->password) - 1); break;
+                case 0: snprintf(state->server_url, sizeof(state->server_url), "%s", buf); break;
+                case 1: snprintf(state->username, sizeof(state->username), "%s", buf); break;
+                case 2: snprintf(state->password, sizeof(state->password), "%s", buf); break;
                 }
             }
         }
@@ -229,10 +229,10 @@ void ui_navigate_into(ui_state_t *state, const jfin_session_t *session,
         if (state->items.count > 0 && state->parent_depth > 0) {
             /* parent ID is already on the stack */
         }
-        strncpy(state->parent_stack_ids[state->parent_depth], item->id,
-                sizeof(state->parent_stack_ids[0]) - 1);
-        strncpy(state->parent_stack_names[state->parent_depth], item->name,
-                sizeof(state->parent_stack_names[0]) - 1);
+        snprintf(state->parent_stack_ids[state->parent_depth],
+                 sizeof(state->parent_stack_ids[0]), "%s", item->id);
+        snprintf(state->parent_stack_names[state->parent_depth],
+                 sizeof(state->parent_stack_names[0]), "%s", item->name);
         state->parent_depth++;
     }
 
@@ -346,8 +346,7 @@ void ui_render_browse(const ui_state_t *state)
         } else if (item->type == JFIN_ITEM_EPISODE && item->index_number > 0) {
             snprintf(label, sizeof(label), "E%d - %s", item->index_number, item->name);
         } else {
-            strncpy(label, item->name, sizeof(label) - 1);
-            label[sizeof(label) - 1] = '\0';
+            snprintf(label, sizeof(label), "%s", item->name);
         }
 
         draw_text(15, y + 4, 0.5f, rgba(COLOR_TEXT_PRIMARY), label);
@@ -366,7 +365,7 @@ void ui_render_browse(const ui_state_t *state)
                 strncat(sub, " - ", sizeof(sub) - strlen(sub) - 1);
                 strncat(sub, dur, sizeof(sub) - strlen(sub) - 1);
             } else {
-                strncpy(sub, dur, sizeof(sub) - 1);
+                snprintf(sub, sizeof(sub), "%s", dur);
             }
         }
         if (sub[0])

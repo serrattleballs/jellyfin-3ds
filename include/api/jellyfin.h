@@ -16,7 +16,8 @@ extern "C" {
 #endif
 
 /* Limits tuned for 3DS memory constraints */
-#define JFIN_MAX_URL          512
+#define JFIN_MAX_URL          1024
+#define JFIN_URL_BUF          2048  /* local buffer for URL composition */
 #define JFIN_MAX_TOKEN        256
 #define JFIN_MAX_NAME         128
 #define JFIN_MAX_ID           64
@@ -47,8 +48,10 @@ typedef struct {
     jfin_item_type_t type;
     int  year;
     int  index_number;               /* track/episode number */
+    char album_id[JFIN_MAX_ID];      /* for album art fallback on audio tracks */
     int64_t runtime_ticks;           /* duration in 10M ticks */
     bool has_primary_image;
+    bool has_album_image;            /* album has art (for audio track fallback) */
 } jfin_item_t;
 
 typedef struct {
@@ -59,7 +62,7 @@ typedef struct {
 } jfin_item_list_t;
 
 typedef struct {
-    char url[JFIN_MAX_URL];          /* ready-to-fetch stream URL */
+    char url[JFIN_URL_BUF];          /* ready-to-fetch stream URL */
     char container[32];              /* "mp3", "opus", "ts", etc. */
     bool is_transcoding;
 } jfin_stream_t;
@@ -162,12 +165,14 @@ bool jfin_get_video_stream(const jfin_session_t *session, const char *item_id,
 /* ── Images ────────────────────────────────────────────────────────── */
 
 /**
- * Build a URL for an item's primary image, pre-scaled for 3DS.
+ * Build a URL for an item's image, pre-scaled for 3DS.
+ * Falls back to album art for audio tracks without their own image.
  * Does not fetch the image — caller uses the URL with their own loader.
  */
-void jfin_get_image_url(const jfin_session_t *session, const char *item_id,
-                        int max_width, int max_height,
-                        char *url_out, int url_out_len);
+void jfin_get_image_url_for_item(const jfin_session_t *session,
+                                 const jfin_item_t *item,
+                                 int max_width, int max_height,
+                                 char *url_out, int url_out_len);
 
 /* ── Playback Reporting ────────────────────────────────────────────── */
 

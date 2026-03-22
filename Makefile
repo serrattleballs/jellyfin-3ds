@@ -3,9 +3,6 @@
 #---------------------------------------------------------------------------------
 .SUFFIXES:
 
-#---------------------------------------------------------------------------------
-# Environment setup
-#---------------------------------------------------------------------------------
 ifeq ($(strip $(DEVKITARM)),)
 $(error "Please set DEVKITARM in your environment. export DEVKITARM=<path to>devkitARM")
 endif
@@ -14,108 +11,125 @@ TOPDIR ?= $(CURDIR)
 include $(DEVKITARM)/3ds_rules
 
 #---------------------------------------------------------------------------------
-# Project details
+# Project configuration
 #---------------------------------------------------------------------------------
-APP_TITLE	:= Jellyfin 3DS
+TARGET		:=	jellyfin-3ds
+BUILD		:=	build
+SOURCES		:=	src src/api src/audio src/video src/ui src/util
+DATA		:=	data
+INCLUDES	:=	include include/api include/audio include/video include/ui include/util
+
+APP_TITLE		:= Jellyfin 3DS
 APP_DESCRIPTION	:= Jellyfin media client for Nintendo 3DS
-APP_AUTHOR	:= jellyfin-3ds team
-APP_ICON	:= $(TOPDIR)/assets/icons/icon.png
+APP_AUTHOR		:= jellyfin-3ds team
 
-TARGET		:= jellyfin-3ds
-BUILD		:= build
-SOURCES		:= src src/api src/audio src/video src/ui src/util
-INCLUDES	:= include
-ROMFS		:= romfs
+# Icon — fall back to libctru default if ours doesn't exist yet
+ifneq ($(wildcard $(TOPDIR)/assets/icons/icon.png),)
+ICON		:=	assets/icons/icon.png
+else
+ICON		:=
+endif
 
 #---------------------------------------------------------------------------------
-# Compiler flags
+# Options for code generation
 #---------------------------------------------------------------------------------
-ARCH	:= -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
+ARCH	:=	-march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 
-CFLAGS	:= -g -Wall -O2 -mword-relocations \
-		   -ffunction-sections \
-		   $(ARCH)
+CFLAGS	:=	-g -Wall -O2 -mword-relocations \
+			-ffunction-sections \
+			$(ARCH)
 
 CFLAGS	+=	$(INCLUDE) -D__3DS__ -DJFIN_VERSION=\"0.1.0\"
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
 
-ASFLAGS	:= -g $(ARCH)
-LDFLAGS	= -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+ASFLAGS	:=	-g $(ARCH)
+LDFLAGS	=	-specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-#---------------------------------------------------------------------------------
-# Libraries
-# Order matters: most dependent first
-#---------------------------------------------------------------------------------
 LIBS	:= -lcitro2d -lcitro3d \
 		   -lcurl -lmbedtls -lmbedx509 -lmbedcrypto \
 		   -lmpg123 -lopusfile -lopus -lvorbisidec -logg \
 		   -lz -lctru -lm
 
-#---------------------------------------------------------------------------------
-# Library paths
-#---------------------------------------------------------------------------------
 LIBDIRS	:= $(CTRULIB) $(PORTLIBS)
 
 #---------------------------------------------------------------------------------
-# Automated build rules (standard devkitARM)
+# Build rules — first invocation sets up, then recurses into $(BUILD)/
 #---------------------------------------------------------------------------------
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 
-export OUTPUT	:= $(CURDIR)/$(TARGET)
-export TOPDIR	:= $(CURDIR)
+export OUTPUT	:=	$(CURDIR)/$(TARGET)
+export TOPDIR	:=	$(CURDIR)
 
-export VPATH	:= $(foreach dir,$(SOURCES),$(CURDIR)/$(dir))
-export DEPSDIR	:= $(CURDIR)/$(BUILD)
+export VPATH	:=	$(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
+					$(foreach dir,$(DATA),$(CURDIR)/$(dir))
 
-CFILES		:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
-CPPFILES	:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
-SFILES		:= $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
+export DEPSDIR	:=	$(CURDIR)/$(BUILD)
 
-export LD	:= $(CC)
+CFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
+CPPFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
+SFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
+BINFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.*)))
 
+export LD	:=	$(CC)
+
+export OFILES_BIN	:=	$(addsuffix .o,$(BINFILES))
 export OFILES_SOURCES := $(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o)
-export OFILES := $(OFILES_SOURCES)
+export OFILES	:=	$(OFILES_BIN) $(OFILES_SOURCES)
+export HFILES	:=	$(addsuffix .h,$(subst .,_,$(BINFILES)))
 
-export INCLUDE	:= $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
-				   $(foreach dir,$(LIBDIRS),-I$(dir)/include) \
-				   -I$(CURDIR)/$(BUILD)
+export INCLUDE	:=	$(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
+					$(foreach dir,$(LIBDIRS),-I$(dir)/include) \
+					-I$(CURDIR)/$(BUILD)
 
-export LIBPATHS	:= $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
+export LIBPATHS	:=	$(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
-.PHONY: $(BUILD) clean
+ifeq ($(strip $(ICON)),)
+	export APP_ICON := $(DEVKITPRO)/libctru/default_icon.png
+else
+	export APP_ICON := $(TOPDIR)/$(ICON)
+endif
+
+ifeq ($(strip $(NO_SMDH)),)
+	export _3DSXFLAGS += --smdh=$(CURDIR)/$(TARGET).smdh
+endif
+
+.PHONY: all clean
+
+all: $(BUILD)
+	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 
 $(BUILD):
-	@[ -d $@ ] || mkdir -p $@
-	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+	@mkdir -p $@
 
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(OUTPUT).3dsx $(OUTPUT).elf
+	@rm -fr $(BUILD) $(TARGET).3dsx $(OUTPUT).smdh $(TARGET).elf
 
+#---------------------------------------------------------------------------------
 else
+#---------------------------------------------------------------------------------
 
-DEPENDS	:= $(OFILES:.o=.d)
+DEPENDS	:=	$(OFILES:.o=.d)
 
 #---------------------------------------------------------------------------------
 # Main targets
 #---------------------------------------------------------------------------------
-$(OUTPUT).3dsx: $(OUTPUT).elf $(OUTPUT).smdh
+$(OUTPUT).3dsx	:	$(OUTPUT).elf $(OUTPUT).smdh
 
-$(OUTPUT).elf: $(OFILES)
+$(OFILES_SOURCES) : $(HFILES)
 
-$(OUTPUT).smdh: $(TOPDIR)/Makefile
-	smdhtool --create "$(APP_TITLE)" "$(APP_DESCRIPTION)" "$(APP_AUTHOR)" $(APP_ICON) $@
+$(OUTPUT).elf	:	$(OFILES)
 
 #---------------------------------------------------------------------------------
-# Generic build rules
+# Binary data rules
 #---------------------------------------------------------------------------------
-%.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+%.bin.o	%_bin.h :	%.bin
+	@echo $(notdir $<)
+	@$(bin2o)
 
-%.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+-include $(DEPSDIR)/*.d
 
--include $(DEPENDS)
-
+#---------------------------------------------------------------------------------
 endif
+#---------------------------------------------------------------------------------

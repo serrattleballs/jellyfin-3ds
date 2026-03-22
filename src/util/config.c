@@ -30,8 +30,7 @@ static void parse_line(const char *line, const char *key, char *out, int out_len
 {
     int klen = strlen(key);
     if (strncmp(line, key, klen) == 0 && line[klen] == '=') {
-        strncpy(out, line + klen + 1, out_len - 1);
-        out[out_len - 1] = '\0';
+        snprintf(out, out_len, "%s", line + klen + 1);
         trim_newline(out);
     }
 }
