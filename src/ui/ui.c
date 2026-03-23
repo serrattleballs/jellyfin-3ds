@@ -241,6 +241,36 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                 /* Double-tap could enter — for now just select */
             }
         }
+        /* L/R for pagination */
+        if (kdown & KEY_R) {
+            /* Next page */
+            if (state->items.start_index + state->items.count < state->items.total_count) {
+                int next_start = state->items.start_index + JFIN_MAX_ITEMS;
+                const char *parent_id = (state->parent_depth > 0)
+                    ? state->parent_stack_ids[state->parent_depth - 1] : NULL;
+                if (state->current_view == VIEW_LIBRARIES) {
+                    /* Libraries don't paginate the same way */
+                } else if (parent_id) {
+                    jfin_get_items(session, parent_id, next_start, JFIN_MAX_ITEMS, &state->items);
+                    state->selected_index = 0;
+                    state->scroll_offset = 0;
+                }
+            }
+        }
+        if (kdown & KEY_L) {
+            /* Previous page */
+            if (state->items.start_index > 0) {
+                int prev_start = state->items.start_index - JFIN_MAX_ITEMS;
+                if (prev_start < 0) prev_start = 0;
+                const char *parent_id = (state->parent_depth > 0)
+                    ? state->parent_stack_ids[state->parent_depth - 1] : NULL;
+                if (parent_id) {
+                    jfin_get_items(session, parent_id, prev_start, JFIN_MAX_ITEMS, &state->items);
+                    state->selected_index = 0;
+                    state->scroll_offset = 0;
+                }
+            }
+        }
         /* Y to toggle now-playing view */
         if ((kdown & KEY_Y) && state->has_now_playing) {
             state->previous_view = state->current_view;
@@ -395,15 +425,17 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
 void ui_navigate_into(ui_state_t *state, const jfin_session_t *session,
                       const jfin_item_t *item)
 {
+    /* Push breadcrumb first, then fetch. If empty, pop it back. */
+    char saved_id[JFIN_MAX_ID];
+    char saved_name[JFIN_MAX_NAME];
+    snprintf(saved_id, sizeof(saved_id), "%s", item->id);
+    snprintf(saved_name, sizeof(saved_name), "%s", item->name);
+
     if (state->parent_depth < 8) {
-        /* Save current parent to stack */
-        if (state->items.count > 0 && state->parent_depth > 0) {
-            /* parent ID is already on the stack */
-        }
         snprintf(state->parent_stack_ids[state->parent_depth],
-                 sizeof(state->parent_stack_ids[0]), "%s", item->id);
+                 sizeof(state->parent_stack_ids[0]), "%s", saved_id);
         snprintf(state->parent_stack_names[state->parent_depth],
-                 sizeof(state->parent_stack_names[0]), "%s", item->name);
+                 sizeof(state->parent_stack_names[0]), "%s", saved_name);
         state->parent_depth++;
     }
 
@@ -411,7 +443,14 @@ void ui_navigate_into(ui_state_t *state, const jfin_session_t *session,
     state->selected_index = 0;
     state->scroll_offset = 0;
 
-    jfin_get_items(session, item->id, 0, JFIN_MAX_ITEMS, &state->items);
+    /* Fetch into state->items directly (no stack-heavy temp copy) */
+    jfin_get_items(session, saved_id, 0, JFIN_MAX_ITEMS, &state->items);
+
+    if (state->items.count == 0) {
+        /* Empty folder — undo navigation */
+        state->parent_depth--;
+        ui_navigate_back(state, session);
+    }
 }
 
 void ui_navigate_back(ui_state_t *state, const jfin_session_t *session)
@@ -543,16 +582,24 @@ void ui_render_browse(const ui_state_t *state)
             draw_text(15, y + 22, 0.4f, rgba(COLOR_TEXT_SECONDARY), sub);
     }
 
-    /* Scroll indicator */
-    if (state->items.total_count > UI_MAX_VISIBLE_ITEMS) {
-        char scroll_info[32];
-        snprintf(scroll_info, sizeof(scroll_info), "%d/%d",
-                 state->selected_index + 1, state->items.count);
-        draw_text(270, 220, 0.4f, rgba(COLOR_TEXT_SECONDARY), scroll_info);
+    /* Scroll + page indicator */
+    if (state->items.total_count > 0) {
+        char info[48];
+        if (state->items.total_count > JFIN_MAX_ITEMS) {
+            int page = (state->items.start_index / JFIN_MAX_ITEMS) + 1;
+            int total_pages = (state->items.total_count + JFIN_MAX_ITEMS - 1) / JFIN_MAX_ITEMS;
+            snprintf(info, sizeof(info), "pg %d/%d (%d total)", page, total_pages, state->items.total_count);
+        } else {
+            snprintf(info, sizeof(info), "%d/%d",
+                     state->selected_index + 1, state->items.count);
+        }
+        draw_text(220, 220, 0.4f, rgba(COLOR_TEXT_SECONDARY), info);
     }
 
-    draw_text(10, 220, 0.4f, rgba(COLOR_TEXT_SECONDARY),
-              "A: Play/Enter  B: Back  Y: Now Playing");
+    if (state->items.total_count > JFIN_MAX_ITEMS)
+        draw_text(10, 220, 0.4f, rgba(COLOR_TEXT_SECONDARY), "A:Select B:Back L/R:Page");
+    else
+        draw_text(10, 220, 0.4f, rgba(COLOR_TEXT_SECONDARY), "A:Select B:Back Y:Playing");
 }
 
 void ui_render_now_playing(const ui_state_t *state, const player_status_t *player)

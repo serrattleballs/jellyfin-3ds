@@ -72,7 +72,7 @@ static bool try_auto_login(void)
     snprintf(s_session.user_id, sizeof(s_session.user_id), "%s", g_config.user_id);
     snprintf(s_session.device_id, sizeof(s_session.device_id), "%s", g_config.device_id);
 
-    /* TODO: validate token with GET /Users/{id} — for now assume valid */
+    /* Token will be validated when views are fetched in the main loop */
     s_session.authenticated = true;
     return true;
 }
@@ -101,6 +101,14 @@ int main(int argc, char *argv[])
 
     if (try_auto_login()) {
         s_ui.current_view = VIEW_LIBRARIES;
+        /* Pre-fetch libraries so they're ready when the view renders */
+        if (!jfin_get_views(&s_session, &s_ui.items) || s_ui.items.count == 0) {
+            /* Token might be stale — fall back to login */
+            s_session.authenticated = false;
+            s_ui.current_view = VIEW_LOGIN;
+            if (g_config.server_url[0] != '\0')
+                snprintf(s_ui.server_url, sizeof(s_ui.server_url), "%s", g_config.server_url);
+        }
     } else {
         s_ui.current_view = VIEW_LOGIN;
         /* Pre-fill server URL from config if available */
