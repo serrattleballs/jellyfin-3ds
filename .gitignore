@@ -13,3 +13,7 @@ compile_commands.json
 
 # macOS
 .DS_Store
+
+# FFmpeg pre-built static libraries (built via lib/ffmpeg/build-ffmpeg.sh)
+lib/ffmpeg/*.a
+lib/ffmpeg/include/
