@@ -61,6 +61,7 @@ static struct {
 
     /* Audio decode */
     AVCodecContext  *audio_dec_ctx;
+    bool            audio_swr_ready;
     SwrContext      *swr_ctx;
     int             audio_sample_rate;
 
@@ -180,37 +181,27 @@ static bool init_audio_decoder(demux_ctx_t *demux)
     }
 
     avcodec_parameters_to_context(s_vp.audio_dec_ctx, par);
+
+    /* TS demuxer may report 0 for sample_rate/channels until first decode.
+     * Default to Jellyfin's transcode output: 48kHz stereo AAC. */
+    if (s_vp.audio_dec_ctx->sample_rate == 0)
+        s_vp.audio_dec_ctx->sample_rate = 48000;
+    if (s_vp.audio_dec_ctx->channels == 0) {
+        s_vp.audio_dec_ctx->channels = 2;
+        s_vp.audio_dec_ctx->channel_layout = AV_CH_LAYOUT_STEREO;
+    }
+
     int open_ret = avcodec_open2(s_vp.audio_dec_ctx, codec, NULL);
     if (open_ret < 0) {
         log_write("AUDIO: avcodec_open2 FAILED ret=%d", open_ret);
         return false;
     }
-    log_write("AUDIO: decoder opened, sample_fmt=%d", s_vp.audio_dec_ctx->sample_fmt);
+    log_write("AUDIO: decoder opened (swr deferred to first frame)");
 
-    /* Set up resampler: whatever input format → s16 stereo */
-    s_vp.swr_ctx = swr_alloc();
-    if (!s_vp.swr_ctx) return false;
-
-    s_vp.audio_sample_rate = par->sample_rate ? par->sample_rate : 48000;
-
-    int64_t in_layout = s_vp.audio_dec_ctx->channel_layout;
-    if (!in_layout)
-        in_layout = av_get_default_channel_layout(s_vp.audio_dec_ctx->channels);
-
-    av_opt_set_channel_layout(s_vp.swr_ctx, "in_channel_layout", in_layout, 0);
-    av_opt_set_int(s_vp.swr_ctx, "in_sample_rate", s_vp.audio_dec_ctx->sample_rate, 0);
-    av_opt_set_sample_fmt(s_vp.swr_ctx, "in_sample_fmt", s_vp.audio_dec_ctx->sample_fmt, 0);
-
-    av_opt_set_channel_layout(s_vp.swr_ctx, "out_channel_layout", AV_CH_LAYOUT_STEREO, 0);
-    av_opt_set_int(s_vp.swr_ctx, "out_sample_rate", s_vp.audio_sample_rate, 0);
-    av_opt_set_sample_fmt(s_vp.swr_ctx, "out_sample_fmt", AV_SAMPLE_FMT_S16, 0);
-
-    int swr_ret = swr_init(s_vp.swr_ctx);
-    if (swr_ret < 0) {
-        log_write("AUDIO: swr_init FAILED ret=%d", swr_ret);
-        return false;
-    }
-    log_write("AUDIO: swr init OK, rate=%d", s_vp.audio_sample_rate);
+    /* swr init is deferred to decode_audio_packet — the actual sample format
+     * isn't known until after the first frame is decoded (TS quirk). */
+    s_vp.audio_swr_ready = false;
+    s_vp.audio_sample_rate = 48000; /* default, updated on first frame */
 
     /* NDSP channel for video audio */
     s_vp.ndsp_channel = 1; /* channel 0 is used by audio player */
@@ -245,6 +236,38 @@ static void decode_audio_packet(AVPacket *pkt)
     if (ret < 0) { av_frame_free(&frame); return; }
 
     while (avcodec_receive_frame(s_vp.audio_dec_ctx, frame) >= 0) {
+        /* Deferred swr init: now we know the real format from the decoded frame */
+        if (!s_vp.audio_swr_ready) {
+            if (s_vp.swr_ctx) swr_free(&s_vp.swr_ctx);
+            s_vp.swr_ctx = swr_alloc();
+            if (!s_vp.swr_ctx) break;
+
+            int64_t in_layout = frame->channel_layout;
+            if (!in_layout)
+                in_layout = av_get_default_channel_layout(frame->channels);
+            int in_rate = frame->sample_rate ? frame->sample_rate : 48000;
+
+            av_opt_set_channel_layout(s_vp.swr_ctx, "in_channel_layout", in_layout, 0);
+            av_opt_set_int(s_vp.swr_ctx, "in_sample_rate", in_rate, 0);
+            av_opt_set_sample_fmt(s_vp.swr_ctx, "in_sample_fmt", frame->format, 0);
+
+            av_opt_set_channel_layout(s_vp.swr_ctx, "out_channel_layout", AV_CH_LAYOUT_STEREO, 0);
+            av_opt_set_int(s_vp.swr_ctx, "out_sample_rate", in_rate, 0);
+            av_opt_set_sample_fmt(s_vp.swr_ctx, "out_sample_fmt", AV_SAMPLE_FMT_S16, 0);
+
+            if (swr_init(s_vp.swr_ctx) < 0) {
+                log_write("AUDIO: swr_init FAILED (deferred) fmt=%d rate=%d ch=%d",
+                          frame->format, in_rate, frame->channels);
+                break;
+            }
+
+            s_vp.audio_sample_rate = in_rate;
+            ndspChnSetRate(s_vp.ndsp_channel, (float)in_rate);
+            s_vp.audio_swr_ready = true;
+            log_write("AUDIO: swr init OK (deferred) fmt=%d rate=%d ch=%d",
+                      frame->format, in_rate, frame->channels);
+        }
+
         /* Find a free NDSP buffer */
         ndspWaveBuf *wbuf = &s_vp.wave_bufs[s_vp.audio_buf_idx];
 
@@ -355,11 +378,6 @@ static void decode_thread_func(void *arg)
                     LightLock_Lock(&s_vp.frame_lock);
                     s_vp.new_frame_available = true;
                     LightLock_Unlock(&s_vp.frame_lock);
-
-                    /* Frame pacing: sleep to match ~24fps (~42ms per frame).
-                     * This is a simple fixed-rate pacer. Real A/V sync
-                     * would use audio PTS as the master clock. */
-                    svcSleepThread(40000000LL); /* 40ms ≈ 25fps */
                 }
             }
 
