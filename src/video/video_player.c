@@ -12,6 +12,8 @@
 #include <citro2d.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "util/log.h"
 #include <malloc.h>
 #include <curl/curl.h>
 
@@ -113,12 +115,15 @@ static size_t net_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
 static void net_thread_func(void *arg)
 {
     (void)arg;
+    log_write("NET: thread started");
     CURL *curl = curl_easy_init();
     if (!curl) {
+        log_write("NET: curl_easy_init failed");
         snprintf(s_vp.error_msg, sizeof(s_vp.error_msg), "curl init failed");
         s_vp.state = VIDEO_ERROR;
         return;
     }
+    log_write("NET: fetching URL (len=%d)", (int)strlen(s_vp.url));
 
     curl_easy_setopt(curl, CURLOPT_URL, s_vp.url);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, net_write_cb);
@@ -131,9 +136,14 @@ static void net_thread_func(void *arg)
 
     CURLcode res = curl_easy_perform(curl);
 
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    log_write("NET: curl done, result=%d (%s), http=%ld, ring_fill=%d",
+              res, curl_easy_strerror(res), http_code, s_vp.demux.ring_fill);
+
     if (res != CURLE_OK && !s_vp.stop_requested) {
         snprintf(s_vp.error_msg, sizeof(s_vp.error_msg),
-                 "Stream: %s", curl_easy_strerror(res));
+                 "HTTP %ld: %s", http_code, curl_easy_strerror(res));
         s_vp.state = VIDEO_ERROR;
     }
 
@@ -145,21 +155,37 @@ static void net_thread_func(void *arg)
 
 static bool init_audio_decoder(demux_ctx_t *demux)
 {
-    if (demux->audio_stream_idx < 0)
+    if (demux->audio_stream_idx < 0) {
+        log_write("AUDIO: no audio stream found");
         return false;
+    }
 
     AVFormatContext *fmt = (AVFormatContext *)demux->fmt_ctx;
     AVCodecParameters *par = fmt->streams[demux->audio_stream_idx]->codecpar;
 
+    log_write("AUDIO: codec_id=%d sample_rate=%d channels=%d",
+              par->codec_id, par->sample_rate, par->channels);
+
     const AVCodec *codec = avcodec_find_decoder(par->codec_id);
-    if (!codec) return false;
+    if (!codec) {
+        log_write("AUDIO: avcodec_find_decoder FAILED for codec_id=%d", par->codec_id);
+        return false;
+    }
+    log_write("AUDIO: found decoder '%s'", codec->name);
 
     s_vp.audio_dec_ctx = avcodec_alloc_context3(codec);
-    if (!s_vp.audio_dec_ctx) return false;
+    if (!s_vp.audio_dec_ctx) {
+        log_write("AUDIO: avcodec_alloc_context3 FAILED");
+        return false;
+    }
 
     avcodec_parameters_to_context(s_vp.audio_dec_ctx, par);
-    if (avcodec_open2(s_vp.audio_dec_ctx, codec, NULL) < 0)
+    int open_ret = avcodec_open2(s_vp.audio_dec_ctx, codec, NULL);
+    if (open_ret < 0) {
+        log_write("AUDIO: avcodec_open2 FAILED ret=%d", open_ret);
         return false;
+    }
+    log_write("AUDIO: decoder opened, sample_fmt=%d", s_vp.audio_dec_ctx->sample_fmt);
 
     /* Set up resampler: whatever input format → s16 stereo */
     s_vp.swr_ctx = swr_alloc();
@@ -179,8 +205,12 @@ static bool init_audio_decoder(demux_ctx_t *demux)
     av_opt_set_int(s_vp.swr_ctx, "out_sample_rate", s_vp.audio_sample_rate, 0);
     av_opt_set_sample_fmt(s_vp.swr_ctx, "out_sample_fmt", AV_SAMPLE_FMT_S16, 0);
 
-    if (swr_init(s_vp.swr_ctx) < 0)
+    int swr_ret = swr_init(s_vp.swr_ctx);
+    if (swr_ret < 0) {
+        log_write("AUDIO: swr_init FAILED ret=%d", swr_ret);
         return false;
+    }
+    log_write("AUDIO: swr init OK, rate=%d", s_vp.audio_sample_rate);
 
     /* NDSP channel for video audio */
     s_vp.ndsp_channel = 1; /* channel 0 is used by audio player */
@@ -251,6 +281,7 @@ static void decode_audio_packet(AVPacket *pkt)
 static void decode_thread_func(void *arg)
 {
     (void)arg;
+    log_write("DEC: thread started, waiting for prefetch (%d bytes)", PREFETCH_BYTES);
 
     /* Wait for prefetch */
     while (!s_vp.stop_requested) {
@@ -258,30 +289,42 @@ static void decode_thread_func(void *arg)
             break;
         svcSleepThread(10000000LL); /* 10ms */
     }
-    if (s_vp.stop_requested) return;
+    if (s_vp.stop_requested) { log_write("DEC: stop during prefetch"); return; }
+
+    log_write("DEC: prefetch done, fill=%d finished=%d", s_vp.demux.ring_fill, s_vp.demux.ring_finished);
 
     /* Init demuxer */
     if (!demux_init(&s_vp.demux)) {
+        log_write("DEC: demux_init FAILED");
         snprintf(s_vp.error_msg, sizeof(s_vp.error_msg), "Demux init failed");
         s_vp.state = VIDEO_ERROR;
         return;
     }
+    log_write("DEC: demux OK video=%dx%d vidx=%d aidx=%d",
+              s_vp.demux.video_width, s_vp.demux.video_height,
+              s_vp.demux.video_stream_idx, s_vp.demux.audio_stream_idx);
 
     /* Init MVD */
     if (!mvd_init(&s_vp.mvd, s_vp.demux.video_width, s_vp.demux.video_height)) {
+        log_write("DEC: mvd_init FAILED");
         snprintf(s_vp.error_msg, sizeof(s_vp.error_msg), "MVD init failed (New 3DS?)");
         s_vp.state = VIDEO_ERROR;
         demux_cleanup(&s_vp.demux);
         return;
     }
+    log_write("DEC: MVD OK %dx%d", s_vp.mvd.width, s_vp.mvd.height);
 
     s_vp.display_width = s_vp.demux.video_width;
     s_vp.display_height = s_vp.demux.video_height;
 
-    /* Send SPS/PPS */
-    if (s_vp.demux.video_extradata) {
+    /* Send SPS/PPS (only for AVCC/MP4 — TS has them inline) */
+    if (s_vp.demux.video_extradata && s_vp.demux.video_extradata_size > 0) {
+        log_write("DEC: sending SPS/PPS from extradata (%d bytes)", s_vp.demux.video_extradata_size);
         mvd_send_sps_pps(&s_vp.mvd, s_vp.demux.video_extradata,
                           s_vp.demux.video_extradata_size);
+    } else {
+        log_write("DEC: no extradata — TS stream, SPS/PPS inline in NAL units");
+        s_vp.mvd.sps_sent = true; /* skip the gate in decode_packet */
     }
 
     /* Init audio decoder */
@@ -307,12 +350,16 @@ static void decode_thread_func(void *arg)
 
             if (got_frame) {
                 if (s_vp.first_frame) {
-                    /* Discard first frame (may be stale from previous session) */
                     s_vp.first_frame = false;
                 } else {
                     LightLock_Lock(&s_vp.frame_lock);
                     s_vp.new_frame_available = true;
                     LightLock_Unlock(&s_vp.frame_lock);
+
+                    /* Frame pacing: sleep to match ~24fps (~42ms per frame).
+                     * This is a simple fixed-rate pacer. Real A/V sync
+                     * would use audio PTS as the master clock. */
+                    svcSleepThread(40000000LL); /* 40ms ≈ 25fps */
                 }
             }
 
@@ -341,29 +388,35 @@ static void decode_thread_func(void *arg)
 
 /* ── GPU texture upload ────────────────────────────────────────────── */
 
+/* Static subtex so it persists (compound literals on stack would dangle) */
+static Tex3DS_SubTexture s_subtex;
+
 static void init_frame_texture(int width, int height)
 {
     /* citro3d textures must be power-of-two dimensions */
     int tex_w = 512; /* >= 400 */
     int tex_h = 256; /* >= 240 */
 
-    if (!C3D_TexInit(&s_vp.frame_tex, tex_w, tex_h, GPU_RGB565))
+    if (!C3D_TexInit(&s_vp.frame_tex, tex_w, tex_h, GPU_RGB565)) {
+        log_write("TEX: C3D_TexInit FAILED %dx%d", tex_w, tex_h);
         return;
+    }
 
     C3D_TexSetFilter(&s_vp.frame_tex, GPU_LINEAR, GPU_LINEAR);
 
     /* Set up C2D_Image to render a sub-region of the texture */
+    s_subtex.width = (u16)width;
+    s_subtex.height = (u16)height;
+    s_subtex.left = 0.0f;
+    s_subtex.top = 1.0f;
+    s_subtex.right = (float)width / tex_w;
+    s_subtex.bottom = 1.0f - ((float)height / tex_h);
+
     s_vp.frame_img.tex = &s_vp.frame_tex;
-    s_vp.frame_img.subtex = &(Tex3DS_SubTexture){
-        .width = (u16)width,
-        .height = (u16)height,
-        .left = 0.0f,
-        .top = 1.0f,
-        .right = (float)width / tex_w,
-        .bottom = 1.0f - ((float)height / tex_h),
-    };
+    s_vp.frame_img.subtex = &s_subtex;
 
     s_vp.tex_initialized = true;
+    log_write("TEX: init OK %dx%d in %dx%d tex", width, height, tex_w, tex_h);
 }
 
 /* Morton/Z-order swizzle for 3DS GPU textures.
@@ -425,6 +478,7 @@ void video_player_cleanup(void)
 
 bool video_player_play(const char *url, int64_t duration_ticks)
 {
+    log_write("PLAY: starting video, url_len=%d", (int)strlen(url));
     video_player_stop();
 
     snprintf(s_vp.url, sizeof(s_vp.url), "%s", url);
@@ -448,16 +502,34 @@ bool video_player_play(const char *url, int64_t duration_ticks)
     /* Reset NDSP channel */
     ndspChnReset(1);
 
-    /* Launch threads */
+    /* Launch threads (-1 = any available core) */
     s32 prio = 0;
     svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    log_write("PLAY: creating threads, prio=%ld", (long)prio);
 
     s_vp.net_thread = threadCreate(net_thread_func, NULL,
-                                    32 * 1024, prio - 1, 1, false);
+                                    32 * 1024, prio - 1, -1, false);
     s_vp.decode_thread = threadCreate(decode_thread_func, NULL,
-                                       64 * 1024, prio - 1, 2, false);
+                                       64 * 1024, prio - 1, -1, false);
 
     if (!s_vp.net_thread || !s_vp.decode_thread) {
+        snprintf(s_vp.error_msg, sizeof(s_vp.error_msg),
+                 "Thread create failed (net=%p dec=%p)",
+                 (void*)s_vp.net_thread, (void*)s_vp.decode_thread);
+        /* Clean up any thread that DID start */
+        s_vp.stop_requested = true;
+        if (s_vp.net_thread) {
+            threadJoin(s_vp.net_thread, U64_MAX);
+            threadFree(s_vp.net_thread);
+            s_vp.net_thread = NULL;
+        }
+        if (s_vp.decode_thread) {
+            threadJoin(s_vp.decode_thread, U64_MAX);
+            threadFree(s_vp.decode_thread);
+            s_vp.decode_thread = NULL;
+        }
+        free(s_vp.demux.ring_data);
+        s_vp.demux.ring_data = NULL;
         s_vp.state = VIDEO_ERROR;
         return false;
     }
@@ -547,6 +619,8 @@ video_status_t video_player_get_status(void)
 
 void video_player_render_frame(void)
 {
+    static int render_log_count = 0;
+
     if (s_vp.state != VIDEO_PLAYING && s_vp.state != VIDEO_PAUSED)
         return;
 
@@ -557,19 +631,30 @@ void video_player_render_frame(void)
     LightLock_Unlock(&s_vp.frame_lock);
 
     if (has_frame) {
+        render_log_count++;
+
         /* Init texture on first frame */
         if (!s_vp.tex_initialized)
             init_frame_texture(s_vp.display_width, s_vp.display_height);
 
         /* Upload decoded BGR565 frame to GPU texture */
         uint8_t *frame = mvd_get_frame(&s_vp.mvd);
-        if (frame)
+        if (frame) {
             upload_bgr565_to_texture(frame, s_vp.mvd.width, s_vp.mvd.height);
+            if (render_log_count <= 3) {
+                /* Log first few pixels to verify frame data isn't all zeros */
+                uint16_t *px = (uint16_t *)frame;
+                log_write("RENDER: frame#%d uploaded %dx%d, first pixels: %04x %04x %04x %04x",
+                          render_log_count, s_vp.mvd.width, s_vp.mvd.height,
+                          px[0], px[1], px[2], px[3]);
+            }
+        } else if (render_log_count <= 3) {
+            log_write("RENDER: frame ptr is NULL!");
+        }
     }
 
     /* Draw the frame texture on the top screen */
     if (s_vp.tex_initialized) {
-        /* Center video on top screen (400x240) */
         float x = (400 - s_vp.display_width) / 2.0f;
         float y = (240 - s_vp.display_height) / 2.0f;
         C2D_DrawImageAt(s_vp.frame_img, x, y, 0.5f, NULL, 1.0f, 1.0f);

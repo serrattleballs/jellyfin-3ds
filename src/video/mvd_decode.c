@@ -14,6 +14,7 @@
 #include <malloc.h>
 
 #include "video/mvd_decode.h"
+#include "util/log.h"
 
 #define ALIGN16(x) (((x) + 15) & ~15)
 #define NAL_BUF_SIZE (256 * 1024)  /* 256KB for NAL unit conversion */
@@ -158,36 +159,49 @@ bool mvd_send_sps_pps(mvd_ctx_t *ctx, const uint8_t *extradata, int extradata_si
 
 bool mvd_decode_packet(mvd_ctx_t *ctx, const uint8_t *data, int size)
 {
-    if (!ctx->initialized || !ctx->sps_sent)
+    if (!ctx->initialized)
         return false;
 
-    /* Convert AVCC → Annex B:
-     * AVCC: [4-byte big-endian length][NAL data] repeating
-     * Annex B: [00 00 01][NAL data] repeating */
-    int src_off = 0;
+    /* Detect packet format:
+     * - TS demuxer: already Annex B (starts with 00 00 00 01 or 00 00 01)
+     * - MP4 demuxer: AVCC format (4-byte big-endian length prefix)
+     * Check by looking for Annex B start code at the beginning. */
+    bool is_annexb = (size >= 4 &&
+                      data[0] == 0x00 && data[1] == 0x00 &&
+                      (data[2] == 0x01 || (data[2] == 0x00 && data[3] == 0x01)));
+
     int dst_off = 0;
 
-    while (src_off + 4 < size && dst_off + 3 < ctx->nal_buf_size) {
-        uint32_t nal_size = ((uint32_t)data[src_off] << 24) |
-                            ((uint32_t)data[src_off + 1] << 16) |
-                            ((uint32_t)data[src_off + 2] << 8) |
-                            (uint32_t)data[src_off + 3];
-        src_off += 4;
+    if (is_annexb) {
+        /* Already Annex B — copy directly to linear memory buffer.
+         * SPS/PPS are inline in the stream, MVD handles them automatically. */
+        if (size > ctx->nal_buf_size)
+            size = ctx->nal_buf_size;
+        memcpy(ctx->nal_buf, data, size);
+        dst_off = size;
+    } else {
+        /* AVCC format — convert to Annex B */
+        int src_off = 0;
+        while (src_off + 4 < size && dst_off + 3 < ctx->nal_buf_size) {
+            uint32_t nal_size = ((uint32_t)data[src_off] << 24) |
+                                ((uint32_t)data[src_off + 1] << 16) |
+                                ((uint32_t)data[src_off + 2] << 8) |
+                                (uint32_t)data[src_off + 3];
+            src_off += 4;
 
-        if ((int)(src_off + nal_size) > size)
-            break;
-        if ((int)(dst_off + 3 + nal_size) > ctx->nal_buf_size)
-            break;
+            if ((int)(src_off + nal_size) > size)
+                break;
+            if ((int)(dst_off + 3 + nal_size) > ctx->nal_buf_size)
+                break;
 
-        /* Write Annex B start code */
-        ctx->nal_buf[dst_off++] = 0x00;
-        ctx->nal_buf[dst_off++] = 0x00;
-        ctx->nal_buf[dst_off++] = 0x01;
+            ctx->nal_buf[dst_off++] = 0x00;
+            ctx->nal_buf[dst_off++] = 0x00;
+            ctx->nal_buf[dst_off++] = 0x01;
 
-        /* Copy NAL unit data */
-        memcpy(ctx->nal_buf + dst_off, data + src_off, nal_size);
-        dst_off += nal_size;
-        src_off += nal_size;
+            memcpy(ctx->nal_buf + dst_off, data + src_off, nal_size);
+            dst_off += nal_size;
+            src_off += nal_size;
+        }
     }
 
     if (dst_off == 0)
@@ -207,12 +221,24 @@ bool mvd_decode_packet(mvd_ctx_t *ctx, const uint8_t *data, int size)
     GSPGPU_FlushDataCache(ctx->nal_buf, dst_off);
     Result ret = mvdstdProcessVideoFrame(ctx->nal_buf, dst_off, 0, NULL);
 
-    if (R_FAILED(ret) && !MVD_CHECKNALUPROC_SUCCESS(ret))
+    static int frame_count = 0;
+    frame_count++;
+    if (frame_count <= 5 || frame_count % 100 == 0) {
+        log_write("MVD: ProcessNAL ret=0x%08lX nal_size=%d frame#%d",
+                  (unsigned long)ret, dst_off, frame_count);
+    }
+
+    if (R_FAILED(ret) && !MVD_CHECKNALUPROC_SUCCESS(ret)) {
+        log_write("MVD: ProcessNAL FAILED ret=0x%08lX", (unsigned long)ret);
         return false;
+    }
 
     /* Try to render the decoded frame */
     if (ret != MVD_STATUS_PARAMSET) {
         ret = mvdstdRenderVideoFrame(&config, true);
+        if (frame_count <= 5 || frame_count % 100 == 0) {
+            log_write("MVD: RenderFrame ret=0x%08lX", (unsigned long)ret);
+        }
         if (R_SUCCEEDED(ret) || ret == MVD_STATUS_OK) {
             GSPGPU_FlushDataCache(ctx->frame_buf[ctx->frame_write_idx],
                                    ctx->width * ctx->height * 2);

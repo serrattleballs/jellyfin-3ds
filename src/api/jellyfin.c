@@ -519,9 +519,10 @@ bool jfin_get_video_stream(const jfin_session_t *session, const char *item_id,
      * No B-frames for MVD hardware decoder compatibility.
      */
     snprintf(out->url, sizeof(out->url),
-             "%s/Videos/%s/stream.ts?UserId=%s&DeviceId=%s"
+             "%s/Videos/%s/stream?UserId=%s&DeviceId=%s"
              "&VideoCodec=h264"
              "&AudioCodec=aac"
+             "&Container=ts"
              "&MaxWidth=400&MaxHeight=240"
              "&VideoBitRate=472000"
              "&AudioBitRate=128000"
@@ -530,8 +531,6 @@ bool jfin_get_video_stream(const jfin_session_t *session, const char *item_id,
              "&Profile=Baseline"
              "&Level=31"
              "&MaxRefFrames=4"
-             "&RequireAvc=true"
-             "&RequireNonAnamorphic=true"
              "&MediaSourceId=%s"
              "&api_key=%s",
              session->server_url, item_id, session->user_id,

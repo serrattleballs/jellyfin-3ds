@@ -181,15 +181,23 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                 if (is_playable) {
                     if (is_video && video_player_is_supported()) {
                         /* Video playback on New 3DS */
-                        audio_player_stop(); /* stop any audio-only playback */
+                        audio_player_stop();
                         jfin_stream_t stream;
-                        if (jfin_get_video_stream(session, item->id, &stream)) {
-                            video_player_play(stream.url, item->runtime_ticks);
+                        if (jfin_get_video_stream(session, item->id, &stream) &&
+                            video_player_play(stream.url, item->runtime_ticks)) {
                             state->now_playing = *item;
                             state->has_now_playing = true;
                             state->previous_view = state->current_view;
                             state->current_view = VIEW_NOW_PLAYING;
                             jfin_report_start(session, item->id);
+                        } else {
+                            /* Video failed — fall back to audio */
+                            if (jfin_get_audio_stream(session, item->id, &stream)) {
+                                audio_player_play(stream.url, item->runtime_ticks);
+                                state->now_playing = *item;
+                                state->has_now_playing = true;
+                                jfin_report_start(session, item->id);
+                            }
                         }
                     } else {
                         /* Audio-only (music, or video on Old 3DS) */
@@ -424,8 +432,7 @@ void ui_render_browse(const ui_state_t *state)
 void ui_render_now_playing(const ui_state_t *state, const player_status_t *player)
 {
     video_status_t vstatus = video_player_get_status();
-    bool is_video = (vstatus.state == VIDEO_PLAYING || vstatus.state == VIDEO_PAUSED ||
-                     vstatus.state == VIDEO_LOADING);
+    bool is_video = (vstatus.state != VIDEO_STOPPED);
 
     /* Top screen */
     C2D_TargetClear(s_top, rgba(COLOR_BG_DARK));

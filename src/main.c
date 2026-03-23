@@ -20,6 +20,7 @@
 #include "video/video_player.h"
 #include "ui/ui.h"
 #include "util/config.h"
+#include "util/log.h"
 
 /* Target 30fps — sufficient for a media browser UI */
 #define TARGET_FPS 30
@@ -79,6 +80,8 @@ static bool try_auto_login(void)
 int main(int argc, char *argv[])
 {
     init_services();
+    log_init();
+    log_write("jellyfin-3ds v" JFIN_VERSION " starting");
 
     /* Load config */
     config_load(&s_config);
@@ -145,6 +148,7 @@ int main(int argc, char *argv[])
     audio_player_cleanup();
     ui_cleanup();
     jfin_cleanup();
+    log_close();
     cleanup_services();
 
     return 0;
