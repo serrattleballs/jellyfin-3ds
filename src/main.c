@@ -17,6 +17,7 @@
 
 #include "api/jellyfin.h"
 #include "audio/player.h"
+#include "video/video_player.h"
 #include "ui/ui.h"
 #include "util/config.h"
 
@@ -88,6 +89,7 @@ int main(int argc, char *argv[])
         cleanup_services();
         return 1;
     }
+    video_player_init(); /* optional — fails gracefully on Old 3DS */
 
     /* Try restoring previous session */
     memset(&s_session, 0, sizeof(s_session));
@@ -137,6 +139,8 @@ int main(int argc, char *argv[])
         config_save(&s_config);
     }
 
+    video_player_stop();
+    video_player_cleanup();
     audio_player_stop();
     audio_player_cleanup();
     ui_cleanup();

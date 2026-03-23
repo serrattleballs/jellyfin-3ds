@@ -16,6 +16,7 @@
 #include "ui/ui.h"
 #include "api/jellyfin.h"
 #include "audio/player.h"
+#include "video/video_player.h"
 
 /* ── Render targets ────────────────────────────────────────────────── */
 
@@ -175,14 +176,31 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                                      item->type == JFIN_ITEM_MUSIC_ARTIST ||
                                      item->type == JFIN_ITEM_SERIES ||
                                      item->type == JFIN_ITEM_SEASON);
+                bool is_video = (item->type == JFIN_ITEM_MOVIE ||
+                                 item->type == JFIN_ITEM_EPISODE);
                 if (is_playable) {
-                    /* Play: audio for music, audio track for movies/episodes */
-                    jfin_stream_t stream;
-                    if (jfin_get_audio_stream(session, item->id, &stream)) {
-                        audio_player_play(stream.url, item->runtime_ticks);
-                        state->now_playing = *item;
-                        state->has_now_playing = true;
-                        jfin_report_start(session, item->id);
+                    if (is_video && video_player_is_supported()) {
+                        /* Video playback on New 3DS */
+                        audio_player_stop(); /* stop any audio-only playback */
+                        jfin_stream_t stream;
+                        if (jfin_get_video_stream(session, item->id, &stream)) {
+                            video_player_play(stream.url, item->runtime_ticks);
+                            state->now_playing = *item;
+                            state->has_now_playing = true;
+                            state->previous_view = state->current_view;
+                            state->current_view = VIEW_NOW_PLAYING;
+                            jfin_report_start(session, item->id);
+                        }
+                    } else {
+                        /* Audio-only (music, or video on Old 3DS) */
+                        video_player_stop(); /* stop any video playback */
+                        jfin_stream_t stream;
+                        if (jfin_get_audio_stream(session, item->id, &stream)) {
+                            audio_player_play(stream.url, item->runtime_ticks);
+                            state->now_playing = *item;
+                            state->has_now_playing = true;
+                            jfin_report_start(session, item->id);
+                        }
                     }
                 } else if (is_container) {
                     ui_navigate_into(state, session, item);
@@ -210,19 +228,29 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
         break;
 
     case VIEW_NOW_PLAYING:
-        /* A to pause/resume */
-        if (kdown & KEY_A) {
-            audio_player_pause();
-        }
-        /* B to go back to browse */
-        if (kdown & KEY_B) {
-            state->current_view = state->previous_view;
-        }
-        /* X to stop */
-        if (kdown & KEY_X) {
-            audio_player_stop();
-            state->has_now_playing = false;
-            state->current_view = state->previous_view;
+        {
+            video_status_t vs = video_player_get_status();
+            bool vid_active = (vs.state == VIDEO_PLAYING || vs.state == VIDEO_PAUSED ||
+                               vs.state == VIDEO_LOADING);
+
+            /* A to pause/resume */
+            if (kdown & KEY_A) {
+                if (vid_active)
+                    video_player_pause();
+                else
+                    audio_player_pause();
+            }
+            /* B to go back to browse */
+            if (kdown & KEY_B) {
+                state->current_view = state->previous_view;
+            }
+            /* X to stop */
+            if (kdown & KEY_X) {
+                video_player_stop();
+                audio_player_stop();
+                state->has_now_playing = false;
+                state->current_view = state->previous_view;
+            }
         }
         break;
     }
@@ -395,7 +423,11 @@ void ui_render_browse(const ui_state_t *state)
 
 void ui_render_now_playing(const ui_state_t *state, const player_status_t *player)
 {
-    /* Top screen: now playing info */
+    video_status_t vstatus = video_player_get_status();
+    bool is_video = (vstatus.state == VIDEO_PLAYING || vstatus.state == VIDEO_PAUSED ||
+                     vstatus.state == VIDEO_LOADING);
+
+    /* Top screen */
     C2D_TargetClear(s_top, rgba(COLOR_BG_DARK));
     C2D_SceneBegin(s_top);
 
@@ -404,29 +436,62 @@ void ui_render_now_playing(const ui_state_t *state, const player_status_t *playe
         return;
     }
 
-    const jfin_item_t *item = &state->now_playing;
+    if (is_video) {
+        /* Render video frame on top screen */
+        video_player_render_frame();
+    } else {
+        /* Audio-only: show track info */
+        const jfin_item_t *item = &state->now_playing;
 
-    /* Album art placeholder */
-    draw_rect(125, 20, 150, 150, rgba(COLOR_BG_CARD));
-    draw_text(165, 85, 0.6f, rgba(COLOR_TEXT_SECONDARY), "ART");
+        draw_rect(125, 20, 150, 150, rgba(COLOR_BG_CARD));
+        draw_text(165, 85, 0.6f, rgba(COLOR_TEXT_SECONDARY), "ART");
 
-    /* Track info */
-    draw_text(50, 180, 0.6f, rgba(COLOR_TEXT_PRIMARY), item->name);
+        draw_text(50, 180, 0.6f, rgba(COLOR_TEXT_PRIMARY), item->name);
 
-    if (item->artist[0])
-        draw_text(50, 200, 0.45f, rgba(COLOR_ACCENT), item->artist);
+        if (item->artist[0])
+            draw_text(50, 200, 0.45f, rgba(COLOR_ACCENT), item->artist);
 
-    if (item->album[0])
-        draw_text(50, 215, 0.4f, rgba(COLOR_TEXT_SECONDARY), item->album);
+        if (item->album[0])
+            draw_text(50, 215, 0.4f, rgba(COLOR_TEXT_SECONDARY), item->album);
+    }
 
     /* Bottom screen: transport controls */
     C2D_TargetClear(s_bottom, rgba(COLOR_BG_DARK));
     C2D_SceneBegin(s_bottom);
 
+    /* Use video position/state if video is playing, otherwise audio */
+    int64_t pos_ticks, dur_ticks;
+    int buf_pct;
+    const char *state_str = "STOPPED";
+
+    if (is_video) {
+        pos_ticks = vstatus.position_ticks;
+        dur_ticks = vstatus.duration_ticks;
+        buf_pct = vstatus.buffer_percent;
+        switch (vstatus.state) {
+        case VIDEO_LOADING:  state_str = "BUFFERING..."; break;
+        case VIDEO_PLAYING:  state_str = "PLAYING"; break;
+        case VIDEO_PAUSED:   state_str = "PAUSED"; break;
+        case VIDEO_ERROR:    state_str = vstatus.error_msg; break;
+        default: break;
+        }
+    } else {
+        pos_ticks = player->position_ticks;
+        dur_ticks = player->duration_ticks;
+        buf_pct = player->buffer_percent;
+        switch (player->state) {
+        case PLAYER_LOADING:  state_str = "BUFFERING..."; break;
+        case PLAYER_PLAYING:  state_str = "PLAYING"; break;
+        case PLAYER_PAUSED:   state_str = "PAUSED"; break;
+        case PLAYER_ERROR:    state_str = player->error_msg; break;
+        default: break;
+        }
+    }
+
     /* Progress bar */
     float progress = 0.0f;
-    if (player->duration_ticks > 0)
-        progress = (float)player->position_ticks / (float)player->duration_ticks;
+    if (dur_ticks > 0)
+        progress = (float)pos_ticks / (float)dur_ticks;
     if (progress > 1.0f) progress = 1.0f;
 
     draw_rect(20, 40, 280, 6, rgba(COLOR_BG_CARD));
@@ -434,25 +499,16 @@ void ui_render_now_playing(const ui_state_t *state, const player_status_t *playe
 
     /* Time labels */
     char pos_str[16], dur_str[16];
-    format_ticks(player->position_ticks, pos_str, sizeof(pos_str));
-    format_ticks(player->duration_ticks, dur_str, sizeof(dur_str));
+    format_ticks(pos_ticks, pos_str, sizeof(pos_str));
+    format_ticks(dur_ticks, dur_str, sizeof(dur_str));
     draw_text(20, 50, 0.4f, rgba(COLOR_TEXT_SECONDARY), pos_str);
     draw_text(270, 50, 0.4f, rgba(COLOR_TEXT_SECONDARY), dur_str);
 
-    /* State indicator */
-    const char *state_str = "STOPPED";
-    switch (player->state) {
-    case PLAYER_LOADING:  state_str = "BUFFERING..."; break;
-    case PLAYER_PLAYING:  state_str = "PLAYING"; break;
-    case PLAYER_PAUSED:   state_str = "PAUSED"; break;
-    case PLAYER_ERROR:    state_str = player->error_msg; break;
-    default: break;
-    }
     draw_text(110, 80, 0.55f, rgba(COLOR_PRIMARY), state_str);
 
     /* Buffer indicator */
     char buf_str[32];
-    snprintf(buf_str, sizeof(buf_str), "Buffer: %d%%", player->buffer_percent);
+    snprintf(buf_str, sizeof(buf_str), "Buffer: %d%%", buf_pct);
     draw_text(115, 100, 0.4f, rgba(COLOR_TEXT_SECONDARY), buf_str);
 
     /* Controls hint */
