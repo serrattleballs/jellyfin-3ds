@@ -29,7 +29,7 @@
 /* ── Ring buffer for network data ──────────────────────────────────── */
 
 #define RING_SIZE       (512 * 1024)  /* 512KB */
-#define PREFETCH_BYTES  (128 * 1024)  /* 128KB before starting decode */
+#define PREFETCH_BYTES  (32 * 1024)   /* 32KB before starting decode */
 #define AUDIO_BUF_SIZE  4096          /* PCM samples per NDSP buffer */
 #define NUM_AUDIO_BUFS  4
 

@@ -67,6 +67,9 @@ typedef struct {
     /* Now playing */
     jfin_item_t  now_playing;
     bool         has_now_playing;
+    int          playing_index;   /* index of currently playing item in items list */
+    bool         auto_advance;    /* auto-play next track/episode when current finishes */
+    bool         auto_stopped;    /* true when user manually stopped (X), false on natural end */
 
     /* Login form */
     char         server_url[JFIN_MAX_URL];

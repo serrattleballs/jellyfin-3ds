@@ -194,6 +194,8 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                             video_player_play(stream.url, item->runtime_ticks)) {
                             state->now_playing = *item;
                             state->has_now_playing = true;
+                            state->playing_index = state->selected_index;
+                            state->auto_stopped = false;
                             state->previous_view = state->current_view;
                             state->current_view = VIEW_NOW_PLAYING;
                             jfin_report_start(session, item->id);
@@ -203,6 +205,8 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                                 audio_player_play(stream.url, item->runtime_ticks);
                                 state->now_playing = *item;
                                 state->has_now_playing = true;
+                                state->playing_index = state->selected_index;
+                                state->auto_stopped = false;
                                 jfin_report_start(session, item->id);
                             }
                         }
@@ -214,6 +218,8 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                             audio_player_play(stream.url, item->runtime_ticks);
                             state->now_playing = *item;
                             state->has_now_playing = true;
+                            state->playing_index = state->selected_index;
+                            state->auto_stopped = false;
                             jfin_report_start(session, item->id);
                         }
                     }
@@ -240,6 +246,56 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
             state->previous_view = state->current_view;
             state->current_view = VIEW_NOW_PLAYING;
         }
+        /* Auto-advance: when current track/episode finishes, play next */
+        if (state->has_now_playing && state->auto_advance && !state->auto_stopped) {
+            player_status_t ps = audio_player_get_status();
+            video_status_t vs = video_player_get_status();
+            bool audio_finished = (ps.state == PLAYER_STOPPED && vs.state == VIDEO_STOPPED);
+            bool video_finished = (vs.state == VIDEO_STOPPED && ps.state == PLAYER_STOPPED);
+
+            if (audio_finished || video_finished) {
+                int next = state->playing_index + 1;
+                if (next < state->items.count) {
+                    jfin_item_t *next_item = &state->items.items[next];
+                    /* Only auto-advance to same playable type */
+                    bool next_playable = (next_item->type == JFIN_ITEM_AUDIO ||
+                                          next_item->type == JFIN_ITEM_MOVIE ||
+                                          next_item->type == JFIN_ITEM_EPISODE);
+                    bool next_is_video = (next_item->type == JFIN_ITEM_MOVIE ||
+                                          next_item->type == JFIN_ITEM_EPISODE);
+                    if (next_playable) {
+                        jfin_stream_t stream;
+                        bool started = false;
+                        if (next_is_video && video_player_is_supported()) {
+                            if (jfin_get_video_stream(session, next_item->id, &stream) &&
+                                video_player_play(stream.url, next_item->runtime_ticks)) {
+                                started = true;
+                            } else if (jfin_get_audio_stream(session, next_item->id, &stream)) {
+                                audio_player_play(stream.url, next_item->runtime_ticks);
+                                started = true;
+                            }
+                        } else {
+                            if (jfin_get_audio_stream(session, next_item->id, &stream)) {
+                                audio_player_play(stream.url, next_item->runtime_ticks);
+                                started = true;
+                            }
+                        }
+                        if (started) {
+                            state->now_playing = *next_item;
+                            state->playing_index = next;
+                            state->auto_stopped = false;
+                            jfin_report_start(session, next_item->id);
+                        } else {
+                            state->has_now_playing = false;
+                        }
+                    } else {
+                        state->has_now_playing = false;
+                    }
+                } else {
+                    state->has_now_playing = false;
+                }
+            }
+        }
         break;
 
     case VIEW_NOW_PLAYING:
@@ -247,6 +303,17 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
             video_status_t vs = video_player_get_status();
             bool vid_active = (vs.state == VIDEO_PLAYING || vs.state == VIDEO_PAUSED ||
                                vs.state == VIDEO_LOADING);
+
+            /* Error state: any button press stops and returns to browse */
+            if (vs.state == VIDEO_ERROR) {
+                if (kdown) {
+                    video_player_stop();
+                    audio_player_stop();
+                    state->has_now_playing = false;
+                    state->current_view = state->previous_view;
+                }
+                break;
+            }
 
             /* A to pause/resume */
             if (kdown & KEY_A) {
@@ -264,7 +331,59 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                 video_player_stop();
                 audio_player_stop();
                 state->has_now_playing = false;
+                state->auto_stopped = true;
                 state->current_view = state->previous_view;
+            }
+            /* Auto-advance from now-playing screen */
+            if (state->has_now_playing && state->auto_advance && !state->auto_stopped) {
+                player_status_t ps = audio_player_get_status();
+                bool audio_done = (ps.state == PLAYER_STOPPED && vs.state == VIDEO_STOPPED);
+                bool video_done = (vs.state == VIDEO_STOPPED && ps.state == PLAYER_STOPPED);
+
+                if (audio_done || video_done) {
+                    int next = state->playing_index + 1;
+                    if (next < state->items.count) {
+                        jfin_item_t *next_item = &state->items.items[next];
+                        bool next_playable = (next_item->type == JFIN_ITEM_AUDIO ||
+                                              next_item->type == JFIN_ITEM_MOVIE ||
+                                              next_item->type == JFIN_ITEM_EPISODE);
+                        bool next_is_video = (next_item->type == JFIN_ITEM_MOVIE ||
+                                              next_item->type == JFIN_ITEM_EPISODE);
+                        if (next_playable) {
+                            jfin_stream_t stream;
+                            bool started = false;
+                            if (next_is_video && video_player_is_supported()) {
+                                if (jfin_get_video_stream(session, next_item->id, &stream) &&
+                                    video_player_play(stream.url, next_item->runtime_ticks)) {
+                                    started = true;
+                                } else if (jfin_get_audio_stream(session, next_item->id, &stream)) {
+                                    audio_player_play(stream.url, next_item->runtime_ticks);
+                                    started = true;
+                                }
+                            } else {
+                                if (jfin_get_audio_stream(session, next_item->id, &stream)) {
+                                    audio_player_play(stream.url, next_item->runtime_ticks);
+                                    started = true;
+                                }
+                            }
+                            if (started) {
+                                state->now_playing = *next_item;
+                                state->playing_index = next;
+                                state->auto_stopped = false;
+                                jfin_report_start(session, next_item->id);
+                            } else {
+                                state->has_now_playing = false;
+                                state->current_view = state->previous_view;
+                            }
+                        } else {
+                            state->has_now_playing = false;
+                            state->current_view = state->previous_view;
+                        }
+                    } else {
+                        state->has_now_playing = false;
+                        state->current_view = state->previous_view;
+                    }
+                }
             }
         }
         break;
@@ -450,7 +569,16 @@ void ui_render_now_playing(const ui_state_t *state, const player_status_t *playe
         return;
     }
 
-    if (is_video) {
+    if (is_video && vstatus.state == VIDEO_ERROR) {
+        /* Show error prominently on top screen */
+        draw_text(50, 60, 0.7f, rgba(0xFF4444FF), "Playback Error");
+        draw_text(30, 100, 0.5f, rgba(COLOR_TEXT_PRIMARY),
+                  vstatus.error_msg[0] ? vstatus.error_msg : "Cannot play this content");
+        draw_text(30, 140, 0.5f, rgba(COLOR_TEXT_SECONDARY),
+                  state->now_playing.name);
+        draw_text(60, 190, 0.45f, rgba(COLOR_TEXT_SECONDARY),
+                  "Press any button to go back");
+    } else if (is_video) {
         /* Render video frame on top screen */
         video_player_render_frame();
     } else {

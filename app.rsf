@@ -23,23 +23,18 @@ AccessControlInfo:
   MaxCpu                        : 0x9E
   DisableDebug                  : true
   EnableForceDebug              : false
-  CanWriteSharedPage            : false
+  CanWriteSharedPage            : true
   CanUsePrivilegedPriority      : false
-  PermitMainFunctionArgument    : false
+  PermitMainFunctionArgument    : true
   CanShareDeviceMemory          : false
-  RunnableOnSleep               : false
+  RunnableOnSleep               : true
   SpecialMemoryArrange          : false
   CoreVersion                   : 2
   DescVersion                   : 2
 
-  # Memory
   MemoryType                    : Application
   SystemMode                    : 64MB
   HandleTableSize               : 0x200
-  IORegisterMapping:
-    - 1ff00000-1ff7ffff
-  MemoryMapping:
-    - 1f000000-1f5fffff:r
 
   SystemCallAccess:
     ArbitrateAddress            : 34
@@ -48,9 +43,9 @@ AccessControlInfo:
     ClearEvent                  : 25
     ClearTimer                  : 29
     CloseHandle                 : 35
-    ConnectToPort                : 45
+    ConnectToPort               : 45
     ControlMemory               : 1
-    CreateAddressArbiter         : 33
+    CreateAddressArbiter        : 33
     CreateEvent                 : 23
     CreateMemoryBlock           : 30
     CreateMutex                 : 19
@@ -89,7 +84,6 @@ AccessControlInfo:
     WaitSynchronization         : 36
     WaitSynchronizationN        : 37
 
-  InterruptNumbers:
   ServiceAccessControl:
     - APT:U
     - ac:u
@@ -97,7 +91,6 @@ AccessControlInfo:
     - boss:U
     - cam:u
     - cecd:u
-    - cfg:nor
     - cfg:u
     - csnd:SND
     - dsp::DSP
@@ -129,4 +122,4 @@ AccessControlInfo:
 SystemControlInfo:
   SaveDataSize            : 0KB
   RemasterVersion         : 0
-  StackSize               : 0x40000
+  StackSize               : 0x100000

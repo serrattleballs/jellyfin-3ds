@@ -26,7 +26,7 @@ static int ring_read_for_avio(void *opaque, uint8_t *buf, int buf_size)
     /* Wait for data (block with sleep, not spin) */
     int waited = 0;
     while (ctx->ring_fill < buf_size && !ctx->ring_finished) {
-        if (waited > 10000) /* 10 seconds timeout */
+        if (waited > 5000) /* 5 seconds timeout */
             return AVERROR_EOF;
         svcSleepThread(1000000LL); /* 1ms */
         waited++;
@@ -85,7 +85,14 @@ bool demux_init(demux_ctx_t *ctx)
 
     /* Probe and open the TS stream */
     const AVInputFormat *input_fmt = av_find_input_format("mpegts");
-    int ret = avformat_open_input(&fmt_ctx, NULL, input_fmt, NULL);
+
+    /* Speed up format detection: 32KB probe + 0.5s analysis is enough for TS */
+    AVDictionary *opts = NULL;
+    av_dict_set(&opts, "probesize", "32768", 0);
+    av_dict_set(&opts, "analyzeduration", "500000", 0);
+
+    int ret = avformat_open_input(&fmt_ctx, NULL, input_fmt, &opts);
+    av_dict_free(&opts);
     if (ret < 0) {
         avio_context_free(&avio_ctx);
         return false;
