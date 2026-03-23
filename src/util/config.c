@@ -99,3 +99,14 @@ void config_ensure_device_id(jfin_config_t *config)
 
     config_save(config);
 }
+
+void config_save_session(jfin_config_t *config, const char *server_url,
+                         const char *access_token, const char *user_id,
+                         const char *username)
+{
+    snprintf(config->server_url, sizeof(config->server_url), "%s", server_url);
+    snprintf(config->access_token, sizeof(config->access_token), "%s", access_token);
+    snprintf(config->user_id, sizeof(config->user_id), "%s", user_id);
+    snprintf(config->username, sizeof(config->username), "%s", username);
+    config_save(config);
+}

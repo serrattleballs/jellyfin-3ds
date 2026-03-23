@@ -26,7 +26,7 @@
 #define TARGET_FPS 30
 
 static jfin_session_t  s_session;
-static jfin_config_t   s_config;
+jfin_config_t          g_config; /* global — accessed by UI for save-on-login */
 static ui_state_t      s_ui;
 
 static void init_services(void)
@@ -63,14 +63,14 @@ static void cleanup_services(void)
 
 static bool try_auto_login(void)
 {
-    if (s_config.server_url[0] == '\0' || s_config.access_token[0] == '\0')
+    if (g_config.server_url[0] == '\0' || g_config.access_token[0] == '\0')
         return false;
 
     /* Restore session from saved config */
-    snprintf(s_session.server_url, sizeof(s_session.server_url), "%s", s_config.server_url);
-    snprintf(s_session.access_token, sizeof(s_session.access_token), "%s", s_config.access_token);
-    snprintf(s_session.user_id, sizeof(s_session.user_id), "%s", s_config.user_id);
-    snprintf(s_session.device_id, sizeof(s_session.device_id), "%s", s_config.device_id);
+    snprintf(s_session.server_url, sizeof(s_session.server_url), "%s", g_config.server_url);
+    snprintf(s_session.access_token, sizeof(s_session.access_token), "%s", g_config.access_token);
+    snprintf(s_session.user_id, sizeof(s_session.user_id), "%s", g_config.user_id);
+    snprintf(s_session.device_id, sizeof(s_session.device_id), "%s", g_config.device_id);
 
     /* TODO: validate token with GET /Users/{id} — for now assume valid */
     s_session.authenticated = true;
@@ -84,8 +84,8 @@ int main(int argc, char *argv[])
     log_write("jellyfin-3ds v" JFIN_VERSION " starting");
 
     /* Load config */
-    config_load(&s_config);
-    config_ensure_device_id(&s_config);
+    config_load(&g_config);
+    config_ensure_device_id(&g_config);
 
     /* Init subsystems — if any fail, exit gracefully */
     if (!jfin_init() || !audio_player_init() || !ui_init()) {
@@ -103,8 +103,8 @@ int main(int argc, char *argv[])
     } else {
         s_ui.current_view = VIEW_LOGIN;
         /* Pre-fill server URL from config if available */
-        if (s_config.server_url[0] != '\0')
-            snprintf(s_ui.server_url, sizeof(s_ui.server_url), "%s", s_config.server_url);
+        if (g_config.server_url[0] != '\0')
+            snprintf(s_ui.server_url, sizeof(s_ui.server_url), "%s", g_config.server_url);
     }
 
     /* ── Main Loop ─────────────────────────────────────────────────── */
@@ -137,9 +137,9 @@ int main(int argc, char *argv[])
 
     /* Save session for next launch */
     if (s_session.authenticated) {
-        snprintf(s_config.access_token, sizeof(s_config.access_token), "%s", s_session.access_token);
-        snprintf(s_config.user_id, sizeof(s_config.user_id), "%s", s_session.user_id);
-        config_save(&s_config);
+        snprintf(g_config.access_token, sizeof(g_config.access_token), "%s", s_session.access_token);
+        snprintf(g_config.user_id, sizeof(g_config.user_id), "%s", s_session.user_id);
+        config_save(&g_config);
     }
 
     video_player_stop();

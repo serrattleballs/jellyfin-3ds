@@ -2,92 +2,83 @@
 
 ## Vision
 
-The first native Jellyfin client for Nintendo 3DS. Audio-first, with video as a stretch goal.
+The first native Jellyfin client for Nintendo 3DS — audio and video.
 
-## Team
+## Status (as of 2026-03-23)
 
-- **You** — project lead, decisions, 3DS hardware for testing
-- **Claude** — implementation via multi-agent workflows (code, research, validation)
-- **Dev 2** (on leave) — joins for polish phase, has second 3DS for testing
+**Working prototype on real hardware.** Audio streaming (music + TV/movie), video streaming (H.264 MVD hardware decode on New 3DS), library browsing, login, session persistence.
 
-## Workflow: Human + Multi-Agent
+### Completed
 
-```
-You (direction + decisions + hardware testing)
- └─→ Claude session
-      ├─→ Agent: implement feature (code generation)
-      ├─→ Agent: validate build (compile checks in devkitPro Docker)
-      ├─→ Agent: review code (security, correctness, 3DS pitfalls)
-      └─→ Agent: research (API docs, reference repos)
-```
+- [x] M0: Build infrastructure (devkitPro Docker, cJSON, CI)
+- [x] M1: Connect & browse (login, library navigation, swkbd input)
+- [x] M2: Audio playback (MP3 streaming, NDSP, pause/resume, 44.1/48kHz auto-detect)
+- [x] M4: Video playback (FFmpeg TS demux, MVD H.264 decode, AAC audio, citro2d display)
 
-### Validation Strategy
+### What Works
 
-1. **Compile checks** — devkitPro Docker build must succeed, zero warnings
-2. **API integration tests** — test Jellyfin API logic via curl against your real server
-3. **Reference cross-check** — compare patterns against ThirdTube/Switchfin/ctrmus
-4. **Citra smoke test** — UI layout and navigation (networking won't work in emulator)
-5. **Real hardware** — you deploy via 3dslink, test networking + audio end-to-end
+| Feature | Status | Notes |
+|---|---|---|
+| Login (user/pass) | Working | swkbd keyboard input |
+| Session persistence | Working | saves to SD card on clean exit (START) |
+| Library browsing | Working | music, movies, TV, all item types |
+| Music streaming | Working | MP3 via mpg123, 44.1/48kHz |
+| Movie/TV audio | Working | AAC via FFmpeg, 48kHz |
+| Video playback | Working | H.264 Baseline 400x224, MVD hardware decode |
+| Video + audio sync | Working | naturally synced via decode thread |
+| Playback controls | Working | pause/resume/stop, progress bar |
+| Playback reporting | Working | reports to Jellyfin dashboard |
 
-## Milestones
+### Known Issues
 
-### M0: Build Infrastructure
-- [ ] devkitPro Docker image for reproducible builds
-- [ ] CI: `make` in Docker, produce .3dsx artifact
-- [ ] Vendor cJSON into the repo
-- [ ] Compile clean with zero warnings
-- [ ] Validate Jellyfin API client logic against real server (curl tests from Proxmox)
+| Issue | Severity | Notes |
+|---|---|---|
+| Video pacing not perfectly smooth | Medium | No audio-master sync — plays at decode rate |
+| ~30s initial buffer for video | Medium | Server transcoding startup + 128KB prefetch |
+| Content without media files fails silently | Low | Shows "Demux init failed" — needs friendlier message |
+| No auto-play next track/episode | Medium | Stops after each item |
+| No credential caching via 3dslink | Low | Works when launching from SD card |
+| Morton tiling CPU-intensive | Low | Could use DMA copy instead |
 
-### M1: Connect & Browse
-- [ ] Login to Jellyfin server (username/password via swkbd)
-- [ ] Fetch and display library views on bottom screen
-- [ ] Navigate into libraries, albums, folders
-- [ ] Paginated item lists (scroll past 50 items)
-- [ ] Save session to SD card, restore on next boot
-- [ ] Error handling: connection refused, bad credentials, timeout
-- [ ] Verify on real 3DS via 3dslink
+## Next Milestones
 
-### M2: Audio Playback — **MVP GATE**
-- [ ] Stream MP3 from Jellyfin /Audio/{id}/universal endpoint
-- [ ] mpg123 decode → NDSP playback
-- [ ] Now-playing screen with track info and progress bar
-- [ ] Pause / resume / stop
-- [ ] Report playback state to Jellyfin server
-- [ ] Queue: play next track in album automatically
-- [ ] Buffer underrun recovery (rebuffer without crash)
-- [ ] End-to-end test: browse → play → hear audio
+### M5: Stability & Error Handling
+- [ ] Graceful error for content without media files (show message, return to browse)
+- [ ] Better buffering UX (show "Server preparing stream..." during transcode startup)
+- [ ] Handle network disconnects without crash
+- [ ] Prevent double-play (stop current before starting new)
+- [ ] Credential caching: verify token on startup, re-auth if expired
+- [ ] Clean up video player resources on all exit paths
 
-### M3: Polish (Dev 2 rejoins)
-- [ ] Album art loading (JPEG decode → GPU texture)
-- [ ] Touch scrolling with momentum
+### M6: Audio-Visual Polish
+- [ ] Audio-master A/V sync (video waits for audio PTS, frame skip when behind)
+- [ ] Auto-play next track in album / next episode in series
+- [ ] Album art loading (JPEG decode → GPU texture on now-playing screen)
+- [ ] Reduce video startup time (smaller prefetch, probe_size hint)
 - [ ] Search via swkbd
-- [ ] QuickConnect auth
-- [ ] "Continue Listening" / recently added
-- [ ] Seek within track
-- [ ] Opus/Vorbis direct play
-- [ ] Settings screen
+- [ ] "Continue Watching/Listening" on home screen
 
-### M4: Video Playback — Stretch
-- [ ] H.264 Baseline transcode (400x240)
-- [ ] MVD hardware decode (New 3DS)
-- [ ] MJPEG software fallback (Old 3DS)
-- [ ] Video top screen, controls bottom screen
+### M7: User Experience
+- [ ] Settings screen (server URL, video bitrate, audio quality)
+- [ ] QuickConnect auth (no keyboard needed)
+- [ ] Touch scrolling with momentum on bottom screen
+- [ ] Loading spinner / activity indicators
+- [ ] New 3DS detection — hide video options on Old 3DS
+- [ ] Volume control
+
+### M8: Release Prep
+- [ ] Custom app icon
+- [ ] First-run setup wizard
+- [ ] GBATemp release thread
+- [ ] Universal-Updater listing
+- [ ] User documentation
 
 ## Non-Goals (for now)
 
 - Live TV / DVR
-- SyncPlay
+- SyncPlay (multi-device sync)
 - Stereoscopic 3D video
-- Old 3DS video (audio-only is fine)
+- Old 3DS video playback (audio-only fallback works)
 - Offline download / sync
-
-## Technical Risks
-
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| Single tester until Dev 2 returns | Hardware bugs found late | Validate thoroughly in code review + compile checks before each deploy |
-| TLS handshake too slow | Login takes 5+ seconds | Connection pooling, HTTP fallback for LAN |
-| WiFi bandwidth insufficient | Buffering/stuttering | Server transcoding at 128kbps, large prefetch buffer |
-| Memory pressure from album art | OOM on Old 3DS | Lazy load, 3 textures max, downscale to 128x128 |
-| mpg123 decode too slow | Audio stuttering | 128kbps MP3, or switch to tremor |
-| Citra networking broken | Can't test network path in emulator | Test API layer via curl from Proxmox, trust ThirdTube's proven patterns |
+- Subtitle rendering (burn-in via server works)
+- HLS adaptive streaming

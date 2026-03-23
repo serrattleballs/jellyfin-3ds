@@ -17,6 +17,9 @@
 #include "api/jellyfin.h"
 #include "audio/player.h"
 #include "video/video_player.h"
+#include "util/config.h"
+
+extern jfin_config_t g_config;
 
 /* ── Render targets ────────────────────────────────────────────────── */
 
@@ -139,6 +142,10 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
         if (kdown & KEY_R) {
             jfin_session_t *s = (jfin_session_t *)session; /* cast away const for login */
             if (jfin_login(s, state->server_url, state->username, state->password)) {
+                /* Save credentials immediately so they persist even on crash */
+                config_save_session(&g_config, s->server_url,
+                                    s->access_token, s->user_id,
+                                    state->username);
                 state->current_view = VIEW_LIBRARIES;
                 jfin_get_views(session, &state->items);
                 state->selected_index = 0;

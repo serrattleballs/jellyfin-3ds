@@ -44,6 +44,14 @@ bool config_save(const jfin_config_t *config);
  */
 void config_ensure_device_id(jfin_config_t *config);
 
+/**
+ * Save session credentials from a live session into config and write to disk.
+ * Call immediately after successful login so credentials persist even on crash.
+ */
+void config_save_session(jfin_config_t *config, const char *server_url,
+                         const char *access_token, const char *user_id,
+                         const char *username);
+
 #ifdef __cplusplus
 }
 #endif
