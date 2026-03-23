@@ -39,19 +39,23 @@ CFLAGS	:=	-g -Wall -O2 -mword-relocations \
 			-ffunction-sections \
 			$(ARCH)
 
-CFLAGS	+=	$(INCLUDE) -D__3DS__ -DJFIN_VERSION=\"0.1.0\"
+CFLAGS	+=	$(INCLUDE) -D__3DS__ -DJFIN_VERSION=\"0.1.0\" -fno-short-enums
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
 
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
+# FFmpeg static libraries (built via lib/ffmpeg/build-ffmpeg.sh)
+FFMPEG_DIR	:= $(TOPDIR)/lib/ffmpeg
+
 LIBS	:= -lcitro2d -lcitro3d \
+		   -lavformat -lavcodec -lavfilter -lswresample -lavutil \
 		   -lcurl -lmbedtls -lmbedx509 -lmbedcrypto \
 		   -lmpg123 -lopusfile -lopus -lvorbisidec -logg \
 		   -lz -lctru -lm
 
-LIBDIRS	:= $(CTRULIB) $(PORTLIBS)
+LIBDIRS	:= $(FFMPEG_DIR) $(CTRULIB) $(PORTLIBS)
 
 #---------------------------------------------------------------------------------
 # Build rules — first invocation sets up, then recurses into $(BUILD)/
@@ -79,10 +83,11 @@ export OFILES	:=	$(OFILES_BIN) $(OFILES_SOURCES)
 export HFILES	:=	$(addsuffix .h,$(subst .,_,$(BINFILES)))
 
 export INCLUDE	:=	$(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
+					-I$(FFMPEG_DIR)/include \
 					$(foreach dir,$(LIBDIRS),-I$(dir)/include) \
 					-I$(CURDIR)/$(BUILD)
 
-export LIBPATHS	:=	$(foreach dir,$(LIBDIRS),-L$(dir)/lib)
+export LIBPATHS	:=	-L$(FFMPEG_DIR) $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
 ifeq ($(strip $(ICON)),)
 	export APP_ICON := $(DEVKITPRO)/libctru/default_icon.png
