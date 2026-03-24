@@ -31,7 +31,10 @@ typedef struct {
     int      buffer_percent;
     int      video_width;
     int      video_height;
-    float    fps;
+    float    decode_fps;
+    float    display_fps;
+    int      frames_decoded;
+    int      frames_displayed;
     char     error_msg[128];
 } video_status_t;
 

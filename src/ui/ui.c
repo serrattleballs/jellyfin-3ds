@@ -696,9 +696,18 @@ void ui_render_now_playing(const ui_state_t *state, const player_status_t *playe
     draw_text(110, 80, 0.55f, rgba(COLOR_PRIMARY), state_str);
 
     /* Buffer indicator */
-    char buf_str[32];
+    char buf_str[64];
     snprintf(buf_str, sizeof(buf_str), "Buffer: %d%%", buf_pct);
     draw_text(115, 100, 0.4f, rgba(COLOR_TEXT_SECONDARY), buf_str);
+
+    /* Diagnostics for video playback */
+    if (is_video) {
+        char diag[64];
+        snprintf(diag, sizeof(diag), "Dec: %.0f fps  Disp: %.0f fps  %dx%d",
+                 vstatus.decode_fps, vstatus.display_fps,
+                 vstatus.video_width, vstatus.video_height);
+        draw_text(30, 125, 0.38f, rgba(COLOR_TEXT_SECONDARY), diag);
+    }
 
     /* Controls hint */
     draw_text(60, 180, 0.5f, rgba(COLOR_TEXT_PRIMARY), "A: Pause   X: Stop   B: Back");

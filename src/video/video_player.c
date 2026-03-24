@@ -86,6 +86,14 @@ static struct {
     /* Display dimensions (actual video, may be smaller than tex) */
     int             display_width;
     int             display_height;
+
+    /* Diagnostics */
+    int             frames_decoded;
+    int             frames_displayed;
+    int             frames_skipped;
+    u64             last_fps_tick;
+    float           decode_fps;
+    float           display_fps;
 } s_vp;
 
 /* ── Audio clock (for A/V sync) ────────────────────────────────────── */
@@ -440,6 +448,7 @@ static void decode_thread_func(void *arg)
                     LightLock_Lock(&s_vp.frame_lock);
                     s_vp.new_frame_available = true;
                     s_vp.frame_pts = video_pts;
+                    s_vp.frames_decoded++;
                     LightLock_Unlock(&s_vp.frame_lock);
                 }
             }
@@ -492,68 +501,35 @@ static void init_frame_texture(int width, int height)
     log_write("TEX: init OK %dx%d in %dx%d tex", width, height, tex_w, tex_h);
 }
 
-/* Optimized Morton-tiled texture upload.
- * Uses precomputed offset jump tables (same approach as ThirdTube).
- * Copies 2 pixels (4 bytes) at a time walking the Z-order curve. */
-
-static int s_inc_x[1024];
-static int s_inc_y[1024];
-static bool s_inc_tables_built = false;
-
-static void build_offset_tables(int tex_w, int tex_h)
-{
-    const int ps = 2; /* pixel size: BGR565 = 2 bytes */
-    for (int i = 0; i + 3 < tex_w; i += 4) {
-        s_inc_x[i]     = 4 * ps;
-        s_inc_x[i + 1] = 12 * ps;
-        s_inc_x[i + 2] = 4 * ps;
-        s_inc_x[i + 3] = 44 * ps;
-    }
-    for (int i = 0; i + 7 < tex_h; i += 8) {
-        s_inc_y[i]     = 2 * ps;
-        s_inc_y[i + 1] = 6 * ps;
-        s_inc_y[i + 2] = 2 * ps;
-        s_inc_y[i + 3] = 22 * ps;
-        s_inc_y[i + 4] = 2 * ps;
-        s_inc_y[i + 5] = 6 * ps;
-        s_inc_y[i + 6] = 2 * ps;
-        s_inc_y[i + 7] = (tex_w * 8 - 42) * ps;
-    }
-    s_inc_tables_built = true;
-}
+/* GPU-accelerated texture upload via GX_DisplayTransfer.
+ * The GPU DMA handles Morton tiling in hardware — zero CPU cost.
+ * Source must be in linear memory (our MVD output already is). */
 
 static void upload_bgr565_to_texture(const uint8_t *src, int src_w, int src_h)
 {
     if (!s_vp.tex_initialized) return;
 
-    u8 *tex_data = (u8 *)s_vp.frame_tex.data;
     int tex_w = s_vp.frame_tex.width;
     int tex_h = s_vp.frame_tex.height;
 
-    if (!s_inc_tables_built)
-        build_offset_tables(tex_w, tex_h);
+    /* Flush source data from CPU cache so GPU DMA sees it */
+    GSPGPU_FlushDataCache(src, src_w * src_h * 2);
 
-    int dst_row = 0;
-    int y_count = 0;
-    int copy_w = (src_w < tex_w) ? src_w : tex_w;
-    int copy_h = (src_h < tex_h) ? src_h : tex_h;
-
-    for (int y = 0; y < copy_h; y++) {
-        const u8 *row = src + y * src_w * 2;
-        int dst_pos = dst_row;
-        int x_count = 0;
-
-        for (int x = 0; x < copy_w; x += 2) {
-            *(u32 *)(tex_data + dst_pos) = *(const u32 *)(row + x * 2);
-            dst_pos += s_inc_x[x_count];
-            x_count++;
-        }
-
-        dst_row += s_inc_y[y_count];
-        y_count++;
-    }
-
-    C3D_TexFlush(&s_vp.frame_tex);
+    /* GX_DisplayTransfer: GPU DMA that converts linear → tiled.
+     * GX_TRANSFER_OUT_TILED(1) enables Morton tiling on output.
+     * GX_TRANSFER_FLIP_VERT(1) because 3DS textures are bottom-up. */
+    C3D_SyncDisplayTransfer(
+        (u32 *)src,
+        GX_BUFFER_DIM(src_w, src_h),
+        (u32 *)s_vp.frame_tex.data,
+        GX_BUFFER_DIM(tex_w, tex_h),
+        (GX_TRANSFER_FLIP_VERT(1) |
+         GX_TRANSFER_OUT_TILED(1) |
+         GX_TRANSFER_RAW_COPY(0) |
+         GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) |
+         GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565) |
+         GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
+    );
 }
 
 /* ── Public API ────────────────────────────────────────────────────── */
@@ -713,7 +689,21 @@ video_status_t video_player_get_status(void)
         ? (s_vp.demux.ring_fill * 100 / s_vp.demux.ring_size) : 0;
     st.video_width = s_vp.display_width;
     st.video_height = s_vp.display_height;
-    st.fps = 0; /* TODO */
+    /* Compute FPS every second */
+    u64 now = svcGetSystemTick();
+    u64 elapsed = now - s_vp.last_fps_tick;
+    if (elapsed > SYSCLOCK_ARM11) { /* 1 second */
+        double sec = (double)elapsed / (double)SYSCLOCK_ARM11;
+        s_vp.decode_fps = s_vp.frames_decoded / sec;
+        s_vp.display_fps = s_vp.frames_displayed / sec;
+        s_vp.frames_decoded = 0;
+        s_vp.frames_displayed = 0;
+        s_vp.last_fps_tick = now;
+    }
+    st.decode_fps = s_vp.decode_fps;
+    st.display_fps = s_vp.display_fps;
+    st.frames_decoded = s_vp.frames_decoded;
+    st.frames_displayed = s_vp.frames_displayed;
     snprintf(st.error_msg, sizeof(st.error_msg), "%s", s_vp.error_msg);
     return st;
 }
@@ -757,8 +747,8 @@ void video_player_render_frame(void)
             uint8_t *frame = mvd_get_frame(&s_vp.mvd);
             if (frame) {
                 upload_bgr565_to_texture(frame, s_vp.mvd.width, s_vp.mvd.height);
+                s_vp.frames_displayed++;
                 if (render_log_count <= 3) {
-                    uint16_t *px = (uint16_t *)frame;
                     log_write("RENDER: frame#%d pts=%.3f uploaded %dx%d",
                               render_log_count, pending_pts, s_vp.mvd.width, s_vp.mvd.height);
                 }
