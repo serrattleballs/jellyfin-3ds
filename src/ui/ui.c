@@ -368,6 +368,14 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                 break;
             }
 
+            /* D-pad down: hide bottom screen (night mode) */
+            if (kdown & KEY_DDOWN) {
+                state->bottom_hidden = true;
+            }
+            /* D-pad up: show bottom screen */
+            if (kdown & KEY_DUP) {
+                state->bottom_hidden = false;
+            }
             /* A to pause/resume */
             if (kdown & KEY_A) {
                 if (vid_active)
@@ -402,10 +410,12 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
             }
             /* B to go back to browse */
             if (kdown & KEY_B) {
+                state->bottom_hidden = false;
                 state->current_view = state->previous_view;
             }
             /* X to stop */
             if (kdown & KEY_X) {
+                state->bottom_hidden = false;
                 video_player_stop();
                 audio_player_stop();
                 state->has_now_playing = false;
@@ -710,9 +720,12 @@ void ui_render_now_playing(const ui_state_t *state, const player_status_t *playe
             draw_text(50, 215, 0.4f, rgba(COLOR_TEXT_SECONDARY), item->album);
     }
 
-    /* Bottom screen: transport controls */
-    C2D_TargetClear(s_bottom, rgba(COLOR_BG_DARK));
+    /* Bottom screen: black when hidden (night mode), controls otherwise */
+    C2D_TargetClear(s_bottom, rgba(0x000000FF));
     C2D_SceneBegin(s_bottom);
+
+    if (state->bottom_hidden)
+        return; /* black bottom screen — just the clear above */
 
     /* Use video position/state if video is playing, otherwise audio */
     int64_t pos_ticks, dur_ticks;
