@@ -492,37 +492,65 @@ static void init_frame_texture(int width, int height)
     log_write("TEX: init OK %dx%d in %dx%d tex", width, height, tex_w, tex_h);
 }
 
-/* Morton/Z-order swizzle for 3DS GPU textures.
- * The GPU stores textures in 8x8 Morton-tiled blocks. */
-static inline uint32_t morton_interleave(uint32_t x, uint32_t y)
+/* Optimized Morton-tiled texture upload.
+ * Uses precomputed offset jump tables (same approach as ThirdTube).
+ * Copies 2 pixels (4 bytes) at a time walking the Z-order curve. */
+
+static int s_inc_x[1024];
+static int s_inc_y[1024];
+static bool s_inc_tables_built = false;
+
+static void build_offset_tables(int tex_w, int tex_h)
 {
-    static const uint32_t mortonTable[8] = {
-        0x00, 0x01, 0x04, 0x05, 0x10, 0x11, 0x14, 0x15
-    };
-    return mortonTable[x % 8] + mortonTable[y % 8] * 2;
+    const int ps = 2; /* pixel size: BGR565 = 2 bytes */
+    for (int i = 0; i + 3 < tex_w; i += 4) {
+        s_inc_x[i]     = 4 * ps;
+        s_inc_x[i + 1] = 12 * ps;
+        s_inc_x[i + 2] = 4 * ps;
+        s_inc_x[i + 3] = 44 * ps;
+    }
+    for (int i = 0; i + 7 < tex_h; i += 8) {
+        s_inc_y[i]     = 2 * ps;
+        s_inc_y[i + 1] = 6 * ps;
+        s_inc_y[i + 2] = 2 * ps;
+        s_inc_y[i + 3] = 22 * ps;
+        s_inc_y[i + 4] = 2 * ps;
+        s_inc_y[i + 5] = 6 * ps;
+        s_inc_y[i + 6] = 2 * ps;
+        s_inc_y[i + 7] = (tex_w * 8 - 42) * ps;
+    }
+    s_inc_tables_built = true;
 }
 
 static void upload_bgr565_to_texture(const uint8_t *src, int src_w, int src_h)
 {
     if (!s_vp.tex_initialized) return;
 
-    uint16_t *tex_data = (uint16_t *)s_vp.frame_tex.data;
-    const uint16_t *pixels = (const uint16_t *)src;
+    u8 *tex_data = (u8 *)s_vp.frame_tex.data;
     int tex_w = s_vp.frame_tex.width;
     int tex_h = s_vp.frame_tex.height;
 
-    /* Copy with Morton tiling */
-    for (int y = 0; y < src_h && y < tex_h; y++) {
-        for (int x = 0; x < src_w && x < tex_w; x++) {
-            /* Calculate Morton index */
-            int block_x = x / 8;
-            int block_y = y / 8;
-            int block_idx = block_x + block_y * (tex_w / 8);
-            int morton_off = morton_interleave(x, y);
-            int tex_idx = block_idx * 64 + morton_off;
+    if (!s_inc_tables_built)
+        build_offset_tables(tex_w, tex_h);
 
-            tex_data[tex_idx] = pixels[y * src_w + x];
+    int dst_row = 0;
+    int y_count = 0;
+    int copy_w = (src_w < tex_w) ? src_w : tex_w;
+    int copy_h = (src_h < tex_h) ? src_h : tex_h;
+
+    for (int y = 0; y < copy_h; y++) {
+        const u8 *row = src + y * src_w * 2;
+        int dst_pos = dst_row;
+        int x_count = 0;
+
+        for (int x = 0; x < copy_w; x += 2) {
+            *(u32 *)(tex_data + dst_pos) = *(const u32 *)(row + x * 2);
+            dst_pos += s_inc_x[x_count];
+            x_count++;
         }
+
+        dst_row += s_inc_y[y_count];
+        y_count++;
     }
 
     C3D_TexFlush(&s_vp.frame_tex);
