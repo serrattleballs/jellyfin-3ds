@@ -65,6 +65,10 @@ static struct {
     SwrContext      *swr_ctx;
     int             audio_sample_rate;
 
+    /* A/V sync — audio is the master clock */
+    double          audio_buf_pts[NUM_AUDIO_BUFS]; /* PTS (seconds) per queued buffer */
+    volatile bool   audio_playing;
+
     /* NDSP audio output */
     int             ndsp_channel;
     ndspWaveBuf     wave_bufs[NUM_AUDIO_BUFS];
@@ -76,12 +80,48 @@ static struct {
     C2D_Image       frame_img;
     bool            tex_initialized;
     volatile bool   new_frame_available;
+    volatile double frame_pts;       /* PTS of the pending frame (seconds) */
     LightLock       frame_lock;
 
     /* Display dimensions (actual video, may be smaller than tex) */
     int             display_width;
     int             display_height;
 } s_vp;
+
+/* ── Audio clock (for A/V sync) ────────────────────────────────────── */
+
+/**
+ * Get current audio playback position in seconds.
+ * Returns -1.0 if audio is not playing (video should display immediately).
+ * Same approach as ThirdTube/FourthTube's Util_speaker_get_current_timestamp.
+ */
+static double get_audio_clock(void)
+{
+    if (!s_vp.audio_playing || s_vp.audio_sample_rate <= 0)
+        return -1.0;
+
+    /* Find the currently playing buffer */
+    for (int i = 0; i < NUM_AUDIO_BUFS; i++) {
+        if (s_vp.wave_bufs[i].status == NDSP_WBUF_PLAYING) {
+            double sample_offset = (double)ndspChnGetSamplePos(s_vp.ndsp_channel)
+                                 / (double)s_vp.audio_sample_rate;
+            return s_vp.audio_buf_pts[i] + sample_offset;
+        }
+    }
+
+    /* No buffer playing — check if any are queued */
+    double min_queued = 1e30;
+    for (int i = 0; i < NUM_AUDIO_BUFS; i++) {
+        if (s_vp.wave_bufs[i].status == NDSP_WBUF_QUEUED) {
+            if (s_vp.audio_buf_pts[i] < min_queued)
+                min_queued = s_vp.audio_buf_pts[i];
+        }
+    }
+    if (min_queued < 1e29)
+        return min_queued;
+
+    return -1.0;
+}
 
 /* ── Network thread ────────────────────────────────────────────────── */
 
@@ -286,11 +326,21 @@ static void decode_audio_packet(AVPacket *pkt)
             (const uint8_t **)frame->extended_data, frame->nb_samples);
 
         if (out_samples > 0) {
+            /* Store PTS for A/V sync before queuing */
+            double frame_pts = -1.0;
+            if (frame->pts != AV_NOPTS_VALUE && s_vp.demux.fmt_ctx) {
+                AVFormatContext *fmt = (AVFormatContext *)s_vp.demux.fmt_ctx;
+                AVRational tb = fmt->streams[s_vp.demux.audio_stream_idx]->time_base;
+                frame_pts = frame->pts * (double)tb.num / (double)tb.den;
+            }
+            s_vp.audio_buf_pts[s_vp.audio_buf_idx] = frame_pts;
+
             wbuf->data_vaddr = s_vp.pcm_bufs[s_vp.audio_buf_idx];
             wbuf->nsamples = out_samples;
             DSP_FlushDataCache(s_vp.pcm_bufs[s_vp.audio_buf_idx],
                                out_samples * sizeof(s16) * 2);
             ndspChnWaveBufAdd(s_vp.ndsp_channel, wbuf);
+            s_vp.audio_playing = true;
 
             s_vp.audio_buf_idx = (s_vp.audio_buf_idx + 1) % NUM_AUDIO_BUFS;
         }
@@ -371,22 +421,27 @@ static void decode_thread_func(void *arg)
         if (is_video) {
             bool got_frame = mvd_decode_packet(&s_vp.mvd, pkt->data, pkt->size);
 
+            /* Compute video PTS in seconds */
+            double video_pts = -1.0;
+            if (pkt->pts != AV_NOPTS_VALUE) {
+                AVFormatContext *fmt = (AVFormatContext *)s_vp.demux.fmt_ctx;
+                AVRational tb = fmt->streams[s_vp.demux.video_stream_idx]->time_base;
+                video_pts = pkt->pts * (double)tb.num / (double)tb.den;
+                s_vp.position_ticks = (int64_t)(video_pts * 10000000.0);
+            }
+
             if (got_frame) {
                 if (s_vp.first_frame) {
                     s_vp.first_frame = false;
                 } else {
+                    /* Post frame for display — never block.
+                     * If the previous frame hasn't been consumed, overwrite it.
+                     * Audio keeps flowing because we never wait here. */
                     LightLock_Lock(&s_vp.frame_lock);
                     s_vp.new_frame_available = true;
+                    s_vp.frame_pts = video_pts;
                     LightLock_Unlock(&s_vp.frame_lock);
                 }
-            }
-
-            /* Update position from video PTS */
-            if (pkt->pts != AV_NOPTS_VALUE) {
-                AVFormatContext *fmt = (AVFormatContext *)s_vp.demux.fmt_ctx;
-                AVRational tb = fmt->streams[s_vp.demux.video_stream_idx]->time_base;
-                double sec = pkt->pts * (double)tb.num / (double)tb.den;
-                s_vp.position_ticks = (int64_t)(sec * 10000000.0);
             }
         } else {
             decode_audio_packet(pkt);
@@ -645,29 +700,41 @@ void video_player_render_frame(void)
     /* Check if decode thread produced a new frame */
     LightLock_Lock(&s_vp.frame_lock);
     bool has_frame = s_vp.new_frame_available;
-    s_vp.new_frame_available = false;
+    double pending_pts = s_vp.frame_pts;
     LightLock_Unlock(&s_vp.frame_lock);
 
     if (has_frame) {
-        render_log_count++;
-
-        /* Init texture on first frame */
-        if (!s_vp.tex_initialized)
-            init_frame_texture(s_vp.display_width, s_vp.display_height);
-
-        /* Upload decoded BGR565 frame to GPU texture */
-        uint8_t *frame = mvd_get_frame(&s_vp.mvd);
-        if (frame) {
-            upload_bgr565_to_texture(frame, s_vp.mvd.width, s_vp.mvd.height);
-            if (render_log_count <= 3) {
-                /* Log first few pixels to verify frame data isn't all zeros */
-                uint16_t *px = (uint16_t *)frame;
-                log_write("RENDER: frame#%d uploaded %dx%d, first pixels: %04x %04x %04x %04x",
-                          render_log_count, s_vp.mvd.width, s_vp.mvd.height,
-                          px[0], px[1], px[2], px[3]);
+        /* A/V sync check: is it time to show this frame?
+         * If video PTS is ahead of audio by >5ms, keep waiting (don't consume).
+         * If audio isn't playing, show immediately. */
+        bool should_display = true;
+        if (pending_pts >= 0) {
+            double audio_pos = get_audio_clock();
+            if (audio_pos >= 0 && pending_pts - audio_pos > 0.005) {
+                should_display = false; /* not yet — wait for next vsync */
             }
-        } else if (render_log_count <= 3) {
-            log_write("RENDER: frame ptr is NULL!");
+        }
+
+        if (should_display) {
+            /* Consume the frame */
+            LightLock_Lock(&s_vp.frame_lock);
+            s_vp.new_frame_available = false;
+            LightLock_Unlock(&s_vp.frame_lock);
+
+            render_log_count++;
+
+            if (!s_vp.tex_initialized)
+                init_frame_texture(s_vp.display_width, s_vp.display_height);
+
+            uint8_t *frame = mvd_get_frame(&s_vp.mvd);
+            if (frame) {
+                upload_bgr565_to_texture(frame, s_vp.mvd.width, s_vp.mvd.height);
+                if (render_log_count <= 3) {
+                    uint16_t *px = (uint16_t *)frame;
+                    log_write("RENDER: frame#%d pts=%.3f uploaded %dx%d",
+                              render_log_count, pending_pts, s_vp.mvd.width, s_vp.mvd.height);
+                }
+            }
         }
     }
 
