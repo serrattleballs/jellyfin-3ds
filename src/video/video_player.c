@@ -501,9 +501,41 @@ static void init_frame_texture(int width, int height)
     log_write("TEX: init OK %dx%d in %dx%d tex", width, height, tex_w, tex_h);
 }
 
-/* GPU-accelerated texture upload via GX_DisplayTransfer.
- * The GPU DMA handles Morton tiling in hardware — zero CPU cost.
- * Source must be in linear memory (our MVD output already is). */
+/* Precomputed-table Morton tiling (CPU, same approach as ThirdTube).
+ * Faster than GX_DisplayTransfer which serializes with GPU pipeline. */
+
+static int s_inc_x[1024];
+static int s_inc_y[1024];
+static bool s_inc_tables_built = false;
+
+static void build_offset_tables(int tex_w, int tex_h)
+{
+    const int ps = 2;
+    for (int i = 0; i + 3 < tex_w; i += 4) {
+        s_inc_x[i]     = 4 * ps;
+        s_inc_x[i + 1] = 12 * ps;
+        s_inc_x[i + 2] = 4 * ps;
+        s_inc_x[i + 3] = 44 * ps;
+    }
+    for (int i = 0; i + 7 < tex_h; i += 8) {
+        s_inc_y[i]     = 2 * ps;
+        s_inc_y[i + 1] = 6 * ps;
+        s_inc_y[i + 2] = 2 * ps;
+        s_inc_y[i + 3] = 22 * ps;
+        s_inc_y[i + 4] = 2 * ps;
+        s_inc_y[i + 5] = 6 * ps;
+        s_inc_y[i + 6] = 2 * ps;
+        s_inc_y[i + 7] = (tex_w * 8 - 42) * ps;
+    }
+    s_inc_tables_built = true;
+}
+
+/* Cached staging buffer for Morton tiling.
+ * Tiling into uncached linear memory (where C3D textures live) is ~50x slower
+ * than tiling into cached heap memory due to random write patterns.
+ * We tile into this cached buffer, then bulk-copy to the texture. */
+static u8 *s_tile_staging = NULL;
+static int  s_tile_staging_size = 0;
 
 static void upload_bgr565_to_texture(const uint8_t *src, int src_w, int src_h)
 {
@@ -511,25 +543,45 @@ static void upload_bgr565_to_texture(const uint8_t *src, int src_w, int src_h)
 
     int tex_w = s_vp.frame_tex.width;
     int tex_h = s_vp.frame_tex.height;
+    int tex_size = tex_w * tex_h * 2;
 
-    /* Flush source data from CPU cache so GPU DMA sees it */
-    GSPGPU_FlushDataCache(src, src_w * src_h * 2);
+    if (!s_inc_tables_built)
+        build_offset_tables(tex_w, tex_h);
 
-    /* GX_DisplayTransfer: GPU DMA that converts linear → tiled.
-     * GX_TRANSFER_OUT_TILED(1) enables Morton tiling on output.
-     * GX_TRANSFER_FLIP_VERT(1) because 3DS textures are bottom-up. */
-    C3D_SyncDisplayTransfer(
-        (u32 *)src,
-        GX_BUFFER_DIM(src_w, src_h),
-        (u32 *)s_vp.frame_tex.data,
-        GX_BUFFER_DIM(tex_w, tex_h),
-        (GX_TRANSFER_FLIP_VERT(1) |
-         GX_TRANSFER_OUT_TILED(1) |
-         GX_TRANSFER_RAW_COPY(0) |
-         GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) |
-         GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565) |
-         GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
-    );
+    /* Allocate cached staging buffer on first use */
+    if (!s_tile_staging || s_tile_staging_size < tex_size) {
+        free(s_tile_staging);
+        s_tile_staging = malloc(tex_size);
+        s_tile_staging_size = tex_size;
+        if (!s_tile_staging) return;
+        memset(s_tile_staging, 0, tex_size);
+    }
+
+    int copy_w = (src_w < tex_w) ? src_w : tex_w;
+    int copy_h = (src_h < tex_h) ? src_h : tex_h;
+
+    /* Phase 1: Morton tiling into cached staging buffer (fast — random writes hit cache) */
+    int dst_row = 0;
+    int y_count = 0;
+    for (int y = 0; y < copy_h; y++) {
+        const u8 *row = src + y * src_w * 2;
+        int dst_pos = dst_row;
+        int x_count = 0;
+
+        for (int x = 0; x < copy_w; x += 2) {
+            *(u32 *)(s_tile_staging + dst_pos) = *(const u32 *)(row + x * 2);
+            dst_pos += s_inc_x[x_count];
+            x_count++;
+        }
+
+        dst_row += s_inc_y[y_count];
+        y_count++;
+    }
+
+    /* Phase 2: Bulk sequential copy to uncached texture memory (fast — sequential writes) */
+    memcpy(s_vp.frame_tex.data, s_tile_staging, tex_size);
+
+    C3D_TexFlush(&s_vp.frame_tex);
 }
 
 /* ── Public API ────────────────────────────────────────────────────── */
@@ -722,19 +774,10 @@ void video_player_render_frame(void)
     LightLock_Unlock(&s_vp.frame_lock);
 
     if (has_frame) {
-        /* A/V sync check: is it time to show this frame?
-         * If video PTS is ahead of audio by >5ms, keep waiting (don't consume).
-         * If audio isn't playing, show immediately. */
-        bool should_display = true;
-        if (pending_pts >= 0) {
-            double audio_pos = get_audio_clock();
-            if (audio_pos >= 0 && pending_pts - audio_pos > 0.005) {
-                should_display = false; /* not yet — wait for next vsync */
-            }
-        }
-
-        if (should_display) {
-            /* Consume the frame */
+        {
+            /* Display immediately — natural sync from TS stream rate.
+             * Audio and video come from the same stream at the same rate,
+             * so they stay synced without explicit PTS gating. */
             LightLock_Lock(&s_vp.frame_lock);
             s_vp.new_frame_available = false;
             LightLock_Unlock(&s_vp.frame_lock);

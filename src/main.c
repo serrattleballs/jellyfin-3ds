@@ -138,8 +138,8 @@ int main(int argc, char *argv[])
         player_status_t pstatus = audio_player_get_status();
         ui_render(&s_ui, &s_session, &pstatus);
 
-        /* Frame pacing handled by gspWaitForVBlank */
-        gspWaitForVBlank();
+        /* C3D_FRAME_SYNCDRAW in ui_render already syncs to vblank.
+         * No additional gspWaitForVBlank needed — double sync halves fps. */
     }
 
     /* ── Cleanup ───────────────────────────────────────────────────── */
