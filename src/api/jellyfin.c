@@ -8,10 +8,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <3ds.h>
 #include <curl/curl.h>
 
 #include "api/jellyfin.h"
 #include "api/cJSON.h"
+#include "util/log.h"
 
 /* ── Internal state ────────────────────────────────────────────────── */
 
@@ -530,9 +532,16 @@ bool jfin_get_video_stream(const jfin_session_t *session, const char *item_id,
              session->server_url, item_id, session->user_id,
              session->device_id, item_id, session->access_token);
 
-    if (start_ticks > 0 && len < (int)sizeof(out->url) - 40)
-        snprintf(out->url + len, sizeof(out->url) - len,
-                 "&StartTimeTicks=%lld", (long long)start_ticks);
+    if (start_ticks > 0 && len < (int)sizeof(out->url) - 80) {
+        /* Cache-buster: Jellyfin caches transcodes per item+device.
+         * A unique PlaySessionId forces a fresh transcode on seek. */
+        u64 tick = svcGetSystemTick();
+        int added = snprintf(out->url + len, sizeof(out->url) - len,
+                 "&StartTimeTicks=%lld&PlaySessionId=3ds%08lx",
+                 (long long)start_ticks, (unsigned long)(tick & 0xFFFFFFFF));
+        log_write("SEEK: StartTimeTicks=%lld session=3ds%08lx",
+                  (long long)start_ticks, (unsigned long)(tick & 0xFFFFFFFF));
+    }
 
     snprintf(out->container, sizeof(out->container), "%s", "ts");
     out->is_transcoding = true;
