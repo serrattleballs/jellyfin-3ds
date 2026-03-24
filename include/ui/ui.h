@@ -70,8 +70,6 @@ typedef struct {
     int          playing_index;   /* index of currently playing item in items list */
     bool         auto_advance;    /* auto-play next track/episode when current finishes */
     bool         auto_stopped;    /* true when user manually stopped (X), false on natural end */
-    int          subtitle_index;  /* -1 = off, >= 0 = burn-in track index */
-    bool         subtitles_on;    /* user toggle state */
 
     /* Login form */
     char         server_url[JFIN_MAX_URL];

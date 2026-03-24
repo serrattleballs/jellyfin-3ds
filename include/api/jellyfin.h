@@ -65,7 +65,7 @@ typedef struct {
     char url[JFIN_URL_BUF];          /* ready-to-fetch stream URL */
     char container[32];              /* "mp3", "opus", "ts", etc. */
     bool is_transcoding;
-    bool subtitles_enabled;          /* server burns subtitles into stream */
+    
 } jfin_stream_t;
 
 typedef struct {
@@ -159,16 +159,10 @@ bool jfin_get_audio_stream(const jfin_session_t *session, const char *item_id,
 /**
  * Get a video stream URL. Requests H.264 baseline 400x240 transcoding
  * for 3DS playback. New 3DS can use hardware decode.
- * subtitle_index: -1 for no subtitles, >= 0 to burn-in that track.
  */
 bool jfin_get_video_stream(const jfin_session_t *session, const char *item_id,
-                           int subtitle_index, jfin_stream_t *out);
+                           jfin_stream_t *out);
 
-/**
- * Get the first subtitle stream index for an item.
- * Returns -1 if no subtitles are available.
- */
-int jfin_get_subtitle_index(const jfin_session_t *session, const char *item_id);
 
 /* ── Images ────────────────────────────────────────────────────────── */
 

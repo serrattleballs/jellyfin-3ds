@@ -509,12 +509,11 @@ bool jfin_get_audio_stream(const jfin_session_t *session, const char *item_id,
 }
 
 bool jfin_get_video_stream(const jfin_session_t *session, const char *item_id,
-                           int subtitle_index, jfin_stream_t *out)
+                           jfin_stream_t *out)
 {
     memset(out, 0, sizeof(*out));
 
-    /* Base URL without subtitles */
-    int len = snprintf(out->url, sizeof(out->url),
+    snprintf(out->url, sizeof(out->url),
              "%s/Videos/%s/stream?UserId=%s&DeviceId=%s"
              "&VideoCodec=h264"
              "&AudioCodec=aac"
@@ -532,51 +531,10 @@ bool jfin_get_video_stream(const jfin_session_t *session, const char *item_id,
              session->server_url, item_id, session->user_id,
              session->device_id, item_id, session->access_token);
 
-    /* Append subtitle parameters if requested */
-    if (subtitle_index >= 0 && len < (int)sizeof(out->url) - 64) {
-        snprintf(out->url + len, sizeof(out->url) - len,
-                 "&SubtitleStreamIndex=%d&SubtitleMethod=Encode",
-                 subtitle_index);
-        out->subtitles_enabled = true;
-    }
-
     snprintf(out->container, sizeof(out->container), "%s", "ts");
     out->is_transcoding = true;
 
     return true;
-}
-
-int jfin_get_subtitle_index(const jfin_session_t *session, const char *item_id)
-{
-    /* Fetch item details including media streams */
-    char url[JFIN_URL_BUF];
-    snprintf(url, sizeof(url), "%s/Users/%s/Items/%s?Fields=MediaSources",
-             session->server_url, session->user_id, item_id);
-
-    cJSON *json = api_get(session, url);
-    if (!json) return -1;
-
-    /* Walk MediaSources[0].MediaStreams looking for subtitle tracks */
-    const cJSON *sources = cJSON_GetObjectItemCaseSensitive(json, "MediaSources");
-    if (cJSON_IsArray(sources) && cJSON_GetArraySize(sources) > 0) {
-        const cJSON *src0 = cJSON_GetArrayItem(sources, 0);
-        const cJSON *streams = cJSON_GetObjectItemCaseSensitive(src0, "MediaStreams");
-        if (cJSON_IsArray(streams)) {
-            int count = cJSON_GetArraySize(streams);
-            for (int i = 0; i < count; i++) {
-                const cJSON *stream = cJSON_GetArrayItem(streams, i);
-                const cJSON *type = cJSON_GetObjectItemCaseSensitive(stream, "Type");
-                if (cJSON_IsString(type) && strcmp(type->valuestring, "Subtitle") == 0) {
-                    int idx = json_get_int(stream, "Index", -1);
-                    cJSON_Delete(json);
-                    return idx; /* return first subtitle track */
-                }
-            }
-        }
-    }
-
-    cJSON_Delete(json);
-    return -1; /* no subtitles */
 }
 
 void jfin_get_image_url_for_item(const jfin_session_t *session,
