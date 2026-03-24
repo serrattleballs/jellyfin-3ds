@@ -33,13 +33,32 @@
 #define AUDIO_BUF_SIZE  4096          /* PCM samples per NDSP buffer */
 #define NUM_AUDIO_BUFS  4
 
+/* ── Video frame queue (decode → convert thread) ───────────────────── */
+
+#define FRAME_QUEUE_SIZE 6
+
+typedef struct {
+    u8     *data;          /* BGR565 pixel data (allocated once) */
+    double  pts;           /* presentation timestamp (seconds) */
+    int     width, height; /* frame dimensions */
+    bool    valid;
+} queued_frame_t;
+
+typedef struct {
+    queued_frame_t frames[FRAME_QUEUE_SIZE];
+    int            write_idx;
+    int            read_idx;
+    volatile int   count;  /* number of frames available to read */
+    LightLock      lock;
+} frame_queue_t;
+
 /* ── Player state ──────────────────────────────────────────────────── */
 
 static struct {
-    /* Threads */
+    /* Threads: network, decode, convert */
     Thread          net_thread;
     Thread          decode_thread;
-    volatile bool   running;
+    Thread          convert_thread;
     volatile bool   stop_requested;
 
     /* State */
@@ -66,7 +85,7 @@ static struct {
     int             audio_sample_rate;
 
     /* A/V sync — audio is the master clock */
-    double          audio_buf_pts[NUM_AUDIO_BUFS]; /* PTS (seconds) per queued buffer */
+    double          audio_buf_pts[NUM_AUDIO_BUFS];
     volatile bool   audio_playing;
 
     /* NDSP audio output */
@@ -75,26 +94,113 @@ static struct {
     s16            *pcm_bufs[NUM_AUDIO_BUFS];
     int             audio_buf_idx;
 
-    /* Frame display */
-    C3D_Tex         frame_tex;
+    /* Frame queue: decode thread → convert thread */
+    frame_queue_t   fq;
+
+    /* Frame display: convert thread → main thread */
+    C3D_Tex         frame_tex[2];     /* double-buffered textures */
     C2D_Image       frame_img;
     bool            tex_initialized;
-    volatile bool   new_frame_available;
-    volatile double frame_pts;       /* PTS of the pending frame (seconds) */
-    LightLock       frame_lock;
+    int             tex_write_idx;    /* convert writes to this */
+    volatile int    tex_display_idx;  /* main thread displays this */
+    volatile bool   new_tex_ready;
+    LightLock       tex_lock;
 
-    /* Display dimensions (actual video, may be smaller than tex) */
+    /* Display dimensions */
     int             display_width;
     int             display_height;
 
     /* Diagnostics */
-    int             frames_decoded;
-    int             frames_displayed;
-    int             frames_skipped;
+    volatile int    frames_decoded;
+    volatile int    frames_displayed;
     u64             last_fps_tick;
     float           decode_fps;
     float           display_fps;
 } s_vp;
+
+/* Morton tiling offset tables — declared early, used by convert thread */
+static int s_inc_x[1024];
+static int s_inc_y[1024];
+static bool s_inc_tables_built = false;
+static Tex3DS_SubTexture s_subtex;
+
+/* ── Frame queue operations ────────────────────────────────────────── */
+
+static void fq_init(frame_queue_t *fq, int frame_w, int frame_h)
+{
+    LightLock_Init(&fq->lock);
+    fq->write_idx = 0;
+    fq->read_idx = 0;
+    fq->count = 0;
+    int frame_size = frame_w * frame_h * 2; /* BGR565 */
+    for (int i = 0; i < FRAME_QUEUE_SIZE; i++) {
+        fq->frames[i].data = linearAlloc(frame_size);
+        fq->frames[i].valid = false;
+    }
+}
+
+static void fq_cleanup(frame_queue_t *fq)
+{
+    for (int i = 0; i < FRAME_QUEUE_SIZE; i++) {
+        if (fq->frames[i].data) {
+            linearFree(fq->frames[i].data);
+            fq->frames[i].data = NULL;
+        }
+    }
+    fq->count = 0;
+}
+
+/* Push a decoded frame. If queue is full, drop the oldest. */
+static bool fq_push(frame_queue_t *fq, const u8 *data, int w, int h, double pts)
+{
+    LightLock_Lock(&fq->lock);
+
+    if (fq->count >= FRAME_QUEUE_SIZE) {
+        /* Drop oldest frame */
+        fq->read_idx = (fq->read_idx + 1) % FRAME_QUEUE_SIZE;
+        fq->count--;
+    }
+
+    queued_frame_t *f = &fq->frames[fq->write_idx];
+    if (f->data) {
+        memcpy(f->data, data, w * h * 2);
+        f->pts = pts;
+        f->width = w;
+        f->height = h;
+        f->valid = true;
+        fq->write_idx = (fq->write_idx + 1) % FRAME_QUEUE_SIZE;
+        fq->count++;
+    }
+
+    LightLock_Unlock(&fq->lock);
+    return true;
+}
+
+/* Peek at the next frame's PTS without consuming it. Returns -1 if empty. */
+static double fq_peek_pts(frame_queue_t *fq)
+{
+    LightLock_Lock(&fq->lock);
+    double pts = -1.0;
+    if (fq->count > 0)
+        pts = fq->frames[fq->read_idx].pts;
+    LightLock_Unlock(&fq->lock);
+    return pts;
+}
+
+/* Pop the next frame. Returns NULL if empty. */
+static queued_frame_t *fq_pop(frame_queue_t *fq)
+{
+    LightLock_Lock(&fq->lock);
+    if (fq->count <= 0) {
+        LightLock_Unlock(&fq->lock);
+        return NULL;
+    }
+    queued_frame_t *f = &fq->frames[fq->read_idx];
+    fq->read_idx = (fq->read_idx + 1) % FRAME_QUEUE_SIZE;
+    fq->count--;
+    LightLock_Unlock(&fq->lock);
+    return f;
+}
 
 /* ── Audio clock (for A/V sync) ────────────────────────────────────── */
 
@@ -398,6 +504,9 @@ static void decode_thread_func(void *arg)
     s_vp.display_width = s_vp.demux.video_width;
     s_vp.display_height = s_vp.demux.video_height;
 
+    /* Init frame queue between decode and convert threads */
+    fq_init(&s_vp.fq, s_vp.mvd.width, s_vp.mvd.height);
+
     /* Send SPS/PPS (only for AVCC/MP4 — TS has them inline) */
     if (s_vp.demux.video_extradata && s_vp.demux.video_extradata_size > 0) {
         log_write("DEC: sending SPS/PPS from extradata (%d bytes)", s_vp.demux.video_extradata_size);
@@ -442,14 +551,14 @@ static void decode_thread_func(void *arg)
                 if (s_vp.first_frame) {
                     s_vp.first_frame = false;
                 } else {
-                    /* Post frame for display — never block.
-                     * If the previous frame hasn't been consumed, overwrite it.
-                     * Audio keeps flowing because we never wait here. */
-                    LightLock_Lock(&s_vp.frame_lock);
-                    s_vp.new_frame_available = true;
-                    s_vp.frame_pts = video_pts;
-                    s_vp.frames_decoded++;
-                    LightLock_Unlock(&s_vp.frame_lock);
+                    /* Push frame to queue for convert thread.
+                     * If queue is full, oldest frame is dropped. */
+                    u8 *frame_data = mvd_get_frame(&s_vp.mvd);
+                    if (frame_data) {
+                        fq_push(&s_vp.fq, frame_data,
+                                s_vp.mvd.width, s_vp.mvd.height, video_pts);
+                        s_vp.frames_decoded++;
+                    }
                 }
             }
         } else {
@@ -466,27 +575,99 @@ static void decode_thread_func(void *arg)
         s_vp.state = VIDEO_STOPPED;
         LightLock_Unlock(&s_vp.state_lock);
     }
+
+    fq_cleanup(&s_vp.fq);
 }
 
-/* ── GPU texture upload ────────────────────────────────────────────── */
+/* ── Convert thread (Morton tiling + A/V sync) ─────────────────────── */
+
+static void convert_thread_func(void *arg)
+{
+    (void)arg;
+    log_write("CONV: thread started");
+
+    while (!s_vp.stop_requested) {
+        /* Wait for a frame in the queue */
+        double next_pts = fq_peek_pts(&s_vp.fq);
+        if (next_pts < 0) {
+            svcSleepThread(2000000LL); /* 2ms — no frame yet */
+            continue;
+        }
+
+        /* A/V sync: wait for audio to catch up (ThirdTube approach).
+         * This sleep doesn't block audio because audio is decoded
+         * in the decode thread, not here. */
+        double audio_pos = get_audio_clock();
+        if (audio_pos >= 0 && next_pts - audio_pos > 0.003) {
+            double sleep_sec = next_pts - audio_pos - 0.0015;
+            if (sleep_sec > 0.1) sleep_sec = 0.1;
+            if (sleep_sec > 0)
+                svcSleepThread((s64)(sleep_sec * 1000000000.0));
+            continue; /* re-check after sleep */
+        }
+
+        /* If video is way behind audio, skip frames to catch up */
+        if (audio_pos >= 0 && audio_pos - next_pts > 0.1) {
+            fq_pop(&s_vp.fq); /* discard late frame */
+            continue;
+        }
+
+        /* Pop the frame and tile it into a texture */
+        queued_frame_t *f = fq_pop(&s_vp.fq);
+        if (!f || !f->data) continue;
+
+        /* Morton tiling into the write texture */
+        int write_idx = s_vp.tex_write_idx;
+        if (s_vp.tex_initialized && s_vp.frame_tex[write_idx].data) {
+            u8 *tex_data = (u8 *)s_vp.frame_tex[write_idx].data;
+            int tex_w = s_vp.frame_tex[write_idx].width;
+
+            int dst_row = 0, y_count = 0;
+            for (int y = 0; y < f->height; y++) {
+                const u8 *row = f->data + y * f->width * 2;
+                int dst_pos = dst_row, x_count = 0;
+                for (int x = 0; x < f->width; x += 2) {
+                    *(u32 *)(tex_data + dst_pos) = *(const u32 *)(row + x * 2);
+                    dst_pos += s_inc_x[x_count++];
+                }
+                dst_row += s_inc_y[y_count++];
+            }
+
+            C3D_TexFlush(&s_vp.frame_tex[write_idx]);
+
+            /* Swap: tell main thread the new texture is ready */
+            LightLock_Lock(&s_vp.tex_lock);
+            s_vp.tex_display_idx = write_idx;
+            s_vp.tex_write_idx = write_idx ^ 1;
+            s_vp.new_tex_ready = true;
+            s_vp.frames_displayed++;
+            LightLock_Unlock(&s_vp.tex_lock);
+        }
+    }
+    log_write("CONV: thread exiting");
+}
+
+/* ── GPU texture setup ─────────────────────────────────────────────── */
+
+/* Morton tiling offset tables (built once, used by convert thread) */
+static void build_offset_tables(int tex_w, int tex_h);
 
 /* Static subtex so it persists (compound literals on stack would dangle) */
-static Tex3DS_SubTexture s_subtex;
 
 static void init_frame_texture(int width, int height)
 {
-    /* citro3d textures must be power-of-two dimensions */
-    int tex_w = 512; /* >= 400 */
-    int tex_h = 256; /* >= 240 */
+    int tex_w = 512;
+    int tex_h = 256;
 
-    if (!C3D_TexInit(&s_vp.frame_tex, tex_w, tex_h, GPU_RGB565)) {
-        log_write("TEX: C3D_TexInit FAILED %dx%d", tex_w, tex_h);
-        return;
+    /* Double-buffered textures: convert thread writes one while GPU reads the other */
+    for (int i = 0; i < 2; i++) {
+        if (!C3D_TexInit(&s_vp.frame_tex[i], tex_w, tex_h, GPU_RGB565)) {
+            log_write("TEX: C3D_TexInit FAILED tex[%d] %dx%d", i, tex_w, tex_h);
+            return;
+        }
+        C3D_TexSetFilter(&s_vp.frame_tex[i], GPU_LINEAR, GPU_LINEAR);
     }
 
-    C3D_TexSetFilter(&s_vp.frame_tex, GPU_LINEAR, GPU_LINEAR);
-
-    /* Set up C2D_Image to render a sub-region of the texture */
     s_subtex.width = (u16)width;
     s_subtex.height = (u16)height;
     s_subtex.left = 0.0f;
@@ -494,19 +675,21 @@ static void init_frame_texture(int width, int height)
     s_subtex.right = (float)width / tex_w;
     s_subtex.bottom = 1.0f - ((float)height / tex_h);
 
-    s_vp.frame_img.tex = &s_vp.frame_tex;
-    s_vp.frame_img.subtex = &s_subtex;
-
+    s_vp.tex_write_idx = 0;
+    s_vp.tex_display_idx = 1;
     s_vp.tex_initialized = true;
-    log_write("TEX: init OK %dx%d in %dx%d tex", width, height, tex_w, tex_h);
+    LightLock_Init(&s_vp.tex_lock);
+
+    /* Build offset tables for Morton tiling */
+    if (!s_inc_tables_built)
+        build_offset_tables(tex_w, tex_h);
+
+    log_write("TEX: init OK %dx%d in %dx%d tex (double buffered)", width, height, tex_w, tex_h);
 }
 
 /* Precomputed-table Morton tiling (CPU, same approach as ThirdTube).
  * Faster than GX_DisplayTransfer which serializes with GPU pipeline. */
 
-static int s_inc_x[1024];
-static int s_inc_y[1024];
-static bool s_inc_tables_built = false;
 
 static void build_offset_tables(int tex_w, int tex_h)
 {
@@ -530,59 +713,6 @@ static void build_offset_tables(int tex_w, int tex_h)
     s_inc_tables_built = true;
 }
 
-/* Cached staging buffer for Morton tiling.
- * Tiling into uncached linear memory (where C3D textures live) is ~50x slower
- * than tiling into cached heap memory due to random write patterns.
- * We tile into this cached buffer, then bulk-copy to the texture. */
-static u8 *s_tile_staging = NULL;
-static int  s_tile_staging_size = 0;
-
-static void upload_bgr565_to_texture(const uint8_t *src, int src_w, int src_h)
-{
-    if (!s_vp.tex_initialized) return;
-
-    int tex_w = s_vp.frame_tex.width;
-    int tex_h = s_vp.frame_tex.height;
-    int tex_size = tex_w * tex_h * 2;
-
-    if (!s_inc_tables_built)
-        build_offset_tables(tex_w, tex_h);
-
-    /* Allocate cached staging buffer on first use */
-    if (!s_tile_staging || s_tile_staging_size < tex_size) {
-        free(s_tile_staging);
-        s_tile_staging = malloc(tex_size);
-        s_tile_staging_size = tex_size;
-        if (!s_tile_staging) return;
-        memset(s_tile_staging, 0, tex_size);
-    }
-
-    int copy_w = (src_w < tex_w) ? src_w : tex_w;
-    int copy_h = (src_h < tex_h) ? src_h : tex_h;
-
-    /* Phase 1: Morton tiling into cached staging buffer (fast — random writes hit cache) */
-    int dst_row = 0;
-    int y_count = 0;
-    for (int y = 0; y < copy_h; y++) {
-        const u8 *row = src + y * src_w * 2;
-        int dst_pos = dst_row;
-        int x_count = 0;
-
-        for (int x = 0; x < copy_w; x += 2) {
-            *(u32 *)(s_tile_staging + dst_pos) = *(const u32 *)(row + x * 2);
-            dst_pos += s_inc_x[x_count];
-            x_count++;
-        }
-
-        dst_row += s_inc_y[y_count];
-        y_count++;
-    }
-
-    /* Phase 2: Bulk sequential copy to uncached texture memory (fast — sequential writes) */
-    memcpy(s_vp.frame_tex.data, s_tile_staging, tex_size);
-
-    C3D_TexFlush(&s_vp.frame_tex);
-}
 
 /* ── Public API ────────────────────────────────────────────────────── */
 
@@ -595,7 +725,7 @@ bool video_player_init(void)
 {
     memset(&s_vp, 0, sizeof(s_vp));
     LightLock_Init(&s_vp.state_lock);
-    LightLock_Init(&s_vp.frame_lock);
+    LightLock_Init(&s_vp.tex_lock);
     s_vp.state = VIDEO_STOPPED;
     return true;
 }
@@ -616,7 +746,7 @@ bool video_player_play(const char *url, int64_t duration_ticks)
     s_vp.error_msg[0] = '\0';
     s_vp.stop_requested = false;
     s_vp.state = VIDEO_LOADING;
-    s_vp.new_frame_available = false;
+    s_vp.new_tex_ready = false;
     s_vp.audio_buf_idx = 0;
 
     /* Allocate ring buffer */
@@ -640,8 +770,10 @@ bool video_player_play(const char *url, int64_t duration_ticks)
                                     32 * 1024, prio - 1, -1, false);
     s_vp.decode_thread = threadCreate(decode_thread_func, NULL,
                                        64 * 1024, prio - 1, -1, false);
+    s_vp.convert_thread = threadCreate(convert_thread_func, NULL,
+                                        32 * 1024, prio, -1, false);
 
-    if (!s_vp.net_thread || !s_vp.decode_thread) {
+    if (!s_vp.net_thread || !s_vp.decode_thread || !s_vp.convert_thread) {
         snprintf(s_vp.error_msg, sizeof(s_vp.error_msg),
                  "Thread create failed (net=%p dec=%p)",
                  (void*)s_vp.net_thread, (void*)s_vp.decode_thread);
@@ -683,6 +815,11 @@ void video_player_stop(void)
         threadFree(s_vp.decode_thread);
         s_vp.decode_thread = NULL;
     }
+    if (s_vp.convert_thread) {
+        threadJoin(s_vp.convert_thread, U64_MAX);
+        threadFree(s_vp.convert_thread);
+        s_vp.convert_thread = NULL;
+    }
 
     ndspChnWaveBufClear(s_vp.ndsp_channel);
 
@@ -711,7 +848,8 @@ void video_player_stop(void)
     }
 
     if (s_vp.tex_initialized) {
-        C3D_TexDelete(&s_vp.frame_tex);
+        C3D_TexDelete(&s_vp.frame_tex[0]);
+        C3D_TexDelete(&s_vp.frame_tex[1]);
         s_vp.tex_initialized = false;
     }
 
@@ -767,40 +905,25 @@ void video_player_render_frame(void)
     if (s_vp.state != VIDEO_PLAYING && s_vp.state != VIDEO_PAUSED)
         return;
 
-    /* Check if decode thread produced a new frame */
-    LightLock_Lock(&s_vp.frame_lock);
-    bool has_frame = s_vp.new_frame_available;
-    double pending_pts = s_vp.frame_pts;
-    LightLock_Unlock(&s_vp.frame_lock);
+    /* Init textures on first call (must be on main thread) */
+    if (!s_vp.tex_initialized && s_vp.display_width > 0)
+        init_frame_texture(s_vp.display_width, s_vp.display_height);
 
-    if (has_frame) {
-        {
-            /* Display immediately — natural sync from TS stream rate.
-             * Audio and video come from the same stream at the same rate,
-             * so they stay synced without explicit PTS gating. */
-            LightLock_Lock(&s_vp.frame_lock);
-            s_vp.new_frame_available = false;
-            LightLock_Unlock(&s_vp.frame_lock);
-
-            render_log_count++;
-
-            if (!s_vp.tex_initialized)
-                init_frame_texture(s_vp.display_width, s_vp.display_height);
-
-            uint8_t *frame = mvd_get_frame(&s_vp.mvd);
-            if (frame) {
-                upload_bgr565_to_texture(frame, s_vp.mvd.width, s_vp.mvd.height);
-                s_vp.frames_displayed++;
-                if (render_log_count <= 3) {
-                    log_write("RENDER: frame#%d pts=%.3f uploaded %dx%d",
-                              render_log_count, pending_pts, s_vp.mvd.width, s_vp.mvd.height);
-                }
-            }
-        }
+    /* Check if convert thread prepared a new texture */
+    LightLock_Lock(&s_vp.tex_lock);
+    if (s_vp.new_tex_ready) {
+        /* Point the C2D image at the newly completed texture */
+        s_vp.frame_img.tex = &s_vp.frame_tex[s_vp.tex_display_idx];
+        s_vp.frame_img.subtex = &s_subtex;
+        s_vp.new_tex_ready = false;
+        render_log_count++;
+        if (render_log_count <= 3)
+            log_write("RENDER: displaying tex[%d] frame#%d", s_vp.tex_display_idx, render_log_count);
     }
+    LightLock_Unlock(&s_vp.tex_lock);
 
-    /* Draw the frame texture on the top screen */
-    if (s_vp.tex_initialized) {
+    /* Draw the frame texture on the top screen — zero upload cost */
+    if (s_vp.tex_initialized && s_vp.frame_img.tex) {
         float x = (400 - s_vp.display_width) / 2.0f;
         float y = (240 - s_vp.display_height) / 2.0f;
         C2D_DrawImageAt(s_vp.frame_img, x, y, 0.5f, NULL, 1.0f, 1.0f);
