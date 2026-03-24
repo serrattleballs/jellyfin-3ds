@@ -65,6 +65,7 @@ typedef struct {
     char url[JFIN_URL_BUF];          /* ready-to-fetch stream URL */
     char container[32];              /* "mp3", "opus", "ts", etc. */
     bool is_transcoding;
+    bool subtitles_enabled;          /* server burns subtitles into stream */
 } jfin_stream_t;
 
 typedef struct {

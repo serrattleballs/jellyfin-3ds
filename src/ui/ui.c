@@ -140,6 +140,14 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
         }
         /* START to attempt login */
         if (kdown & KEY_R) {
+            /* Show connecting indicator before blocking login call */
+            C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+            C2D_TextBufClear(s_text_buf);
+            C2D_TargetClear(s_bottom, rgba(COLOR_BG_DARK));
+            C2D_SceneBegin(s_bottom);
+            draw_text(100, 110, 0.6f, rgba(COLOR_PRIMARY), "Connecting...");
+            C3D_FrameEnd(0);
+
             jfin_session_t *s = (jfin_session_t *)session; /* cast away const for login */
             if (jfin_login(s, state->server_url, state->username, state->password)) {
                 /* Save credentials immediately so they persist even on crash */
@@ -275,6 +283,21 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
         if ((kdown & KEY_Y) && state->has_now_playing) {
             state->previous_view = state->current_view;
             state->current_view = VIEW_NOW_PLAYING;
+        }
+        /* SELECT to search */
+        if (kdown & KEY_SELECT) {
+            SwkbdState swkbd;
+            char query[128] = {0};
+            swkbdInit(&swkbd, SWKBD_TYPE_WESTERN, 2, 127);
+            swkbdSetHintText(&swkbd, "Search...");
+            SwkbdButton button = swkbdInputText(&swkbd, query, sizeof(query));
+            if (button == SWKBD_BUTTON_CONFIRM && query[0] != '\0') {
+                jfin_search(session, query, JFIN_MAX_ITEMS, &state->items);
+                state->selected_index = 0;
+                state->scroll_offset = 0;
+                state->current_view = VIEW_BROWSE;
+                /* Don't push to breadcrumb -- search results are a flat list */
+            }
         }
         /* Auto-advance: when current track/episode finishes, play next */
         if (state->has_now_playing && state->auto_advance && !state->auto_stopped) {
@@ -443,6 +466,14 @@ void ui_navigate_into(ui_state_t *state, const jfin_session_t *session,
     state->selected_index = 0;
     state->scroll_offset = 0;
 
+    /* Show loading indicator before blocking API call */
+    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    C2D_TextBufClear(s_text_buf);
+    C2D_TargetClear(s_bottom, rgba(COLOR_BG_DARK));
+    C2D_SceneBegin(s_bottom);
+    draw_text(115, 110, 0.6f, rgba(COLOR_PRIMARY), "Loading...");
+    C3D_FrameEnd(0);
+
     /* Fetch into state->items directly (no stack-heavy temp copy) */
     jfin_get_items(session, saved_id, 0, JFIN_MAX_ITEMS, &state->items);
 
@@ -524,7 +555,7 @@ void ui_render_libraries(const ui_state_t *state)
     }
 
     draw_text(10, 220, 0.4f, rgba(COLOR_TEXT_SECONDARY),
-              "D-Pad: Navigate  A: Enter  Y: Now Playing");
+              "A:Enter B:Back Y:Playing SEL:Search");
 }
 
 void ui_render_browse(const ui_state_t *state)
@@ -597,9 +628,9 @@ void ui_render_browse(const ui_state_t *state)
     }
 
     if (state->items.total_count > JFIN_MAX_ITEMS)
-        draw_text(10, 220, 0.4f, rgba(COLOR_TEXT_SECONDARY), "A:Select B:Back L/R:Page");
+        draw_text(10, 220, 0.4f, rgba(COLOR_TEXT_SECONDARY), "A:Sel B:Back L/R:Pg SEL:Search");
     else
-        draw_text(10, 220, 0.4f, rgba(COLOR_TEXT_SECONDARY), "A:Select B:Back Y:Playing");
+        draw_text(10, 220, 0.4f, rgba(COLOR_TEXT_SECONDARY), "A:Sel B:Back Y:Playing SEL:Search");
 }
 
 void ui_render_now_playing(const ui_state_t *state, const player_status_t *player)
@@ -625,9 +656,19 @@ void ui_render_now_playing(const ui_state_t *state, const player_status_t *playe
                   state->now_playing.name);
         draw_text(60, 190, 0.45f, rgba(COLOR_TEXT_SECONDARY),
                   "Press any button to go back");
+    } else if (is_video && vstatus.state == VIDEO_LOADING) {
+        /* Show buffering indicator while video is loading */
+        draw_text(130, 100, 0.7f, rgba(COLOR_PRIMARY), "Buffering...");
+        draw_text(80, 135, 0.45f, rgba(COLOR_TEXT_SECONDARY),
+                  state->now_playing.name);
     } else if (is_video) {
         /* Render video frame on top screen */
         video_player_render_frame();
+    } else if (player->state == PLAYER_LOADING) {
+        /* Show buffering indicator while audio is loading */
+        draw_text(130, 100, 0.7f, rgba(COLOR_PRIMARY), "Buffering...");
+        draw_text(80, 135, 0.45f, rgba(COLOR_TEXT_SECONDARY),
+                  state->now_playing.name);
     } else {
         /* Audio-only: show track info */
         const jfin_item_t *item = &state->now_playing;

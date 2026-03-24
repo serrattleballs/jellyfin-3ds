@@ -531,6 +531,7 @@ bool jfin_get_video_stream(const jfin_session_t *session, const char *item_id,
              "&Profile=Baseline"
              "&Level=31"
              "&MaxRefFrames=4"
+             "&SubtitleMethod=Encode"
              "&MediaSourceId=%s"
              "&api_key=%s",
              session->server_url, item_id, session->user_id,
