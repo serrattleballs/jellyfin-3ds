@@ -198,8 +198,8 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                         /* Video playback on New 3DS */
                         audio_player_stop();
                         jfin_stream_t stream;
-                        if (jfin_get_video_stream(session, item->id, &stream) &&
-                            video_player_play(stream.url, item->runtime_ticks)) {
+                        if (jfin_get_video_stream(session, item->id, 0, &stream) &&
+                            video_player_play(stream.url, item->runtime_ticks, 0)) {
                             state->now_playing = *item;
                             state->has_now_playing = true;
                             state->playing_index = state->selected_index;
@@ -209,8 +209,8 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                             jfin_report_start(session, item->id);
                         } else {
                             /* Video failed — fall back to audio */
-                            if (jfin_get_audio_stream(session, item->id, &stream)) {
-                                audio_player_play(stream.url, item->runtime_ticks);
+                            if (jfin_get_audio_stream(session, item->id, 0, &stream)) {
+                                audio_player_play(stream.url, item->runtime_ticks, 0);
                                 state->now_playing = *item;
                                 state->has_now_playing = true;
                                 state->playing_index = state->selected_index;
@@ -222,8 +222,8 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                         /* Audio-only (music, or video on Old 3DS) */
                         video_player_stop(); /* stop any video playback */
                         jfin_stream_t stream;
-                        if (jfin_get_audio_stream(session, item->id, &stream)) {
-                            audio_player_play(stream.url, item->runtime_ticks);
+                        if (jfin_get_audio_stream(session, item->id, 0, &stream)) {
+                            audio_player_play(stream.url, item->runtime_ticks, 0);
                             state->now_playing = *item;
                             state->has_now_playing = true;
                             state->playing_index = state->selected_index;
@@ -320,16 +320,16 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                         jfin_stream_t stream;
                         bool started = false;
                         if (next_is_video && video_player_is_supported()) {
-                            if (jfin_get_video_stream(session, next_item->id, &stream) &&
-                                video_player_play(stream.url, next_item->runtime_ticks)) {
+                            if (jfin_get_video_stream(session, next_item->id, 0, &stream) &&
+                                video_player_play(stream.url, next_item->runtime_ticks, 0)) {
                                 started = true;
-                            } else if (jfin_get_audio_stream(session, next_item->id, &stream)) {
-                                audio_player_play(stream.url, next_item->runtime_ticks);
+                            } else if (jfin_get_audio_stream(session, next_item->id, 0, &stream)) {
+                                audio_player_play(stream.url, next_item->runtime_ticks, 0);
                                 started = true;
                             }
                         } else {
-                            if (jfin_get_audio_stream(session, next_item->id, &stream)) {
-                                audio_player_play(stream.url, next_item->runtime_ticks);
+                            if (jfin_get_audio_stream(session, next_item->id, 0, &stream)) {
+                                audio_player_play(stream.url, next_item->runtime_ticks, 0);
                                 started = true;
                             }
                         }
@@ -375,6 +375,31 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                 else
                     audio_player_pause();
             }
+            /* L/R to seek ±30 seconds */
+            if ((kdown & KEY_L) || (kdown & KEY_R)) {
+                int64_t offset = (kdown & KEY_R) ? 300000000LL : -300000000LL; /* ±30s */
+                int64_t cur_pos;
+                if (vid_active)
+                    cur_pos = vs.position_ticks;
+                else
+                    cur_pos = audio_player_get_status().position_ticks;
+
+                int64_t new_pos = cur_pos + offset;
+                if (new_pos < 0) new_pos = 0;
+                if (new_pos >= state->now_playing.runtime_ticks)
+                    new_pos = state->now_playing.runtime_ticks - 100000000LL; /* 10s before end */
+
+                jfin_stream_t stream;
+                if (vid_active) {
+                    video_player_stop();
+                    if (jfin_get_video_stream(session, state->now_playing.id, new_pos, &stream))
+                        video_player_play(stream.url, state->now_playing.runtime_ticks, new_pos);
+                } else {
+                    audio_player_stop();
+                    if (jfin_get_audio_stream(session, state->now_playing.id, new_pos, &stream))
+                        audio_player_play(stream.url, state->now_playing.runtime_ticks, new_pos);
+                }
+            }
             /* B to go back to browse */
             if (kdown & KEY_B) {
                 state->current_view = state->previous_view;
@@ -406,16 +431,16 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                             jfin_stream_t stream;
                             bool started = false;
                             if (next_is_video && video_player_is_supported()) {
-                                if (jfin_get_video_stream(session, next_item->id, &stream) &&
-                                    video_player_play(stream.url, next_item->runtime_ticks)) {
+                                if (jfin_get_video_stream(session, next_item->id, 0, &stream) &&
+                                    video_player_play(stream.url, next_item->runtime_ticks, 0)) {
                                     started = true;
-                                } else if (jfin_get_audio_stream(session, next_item->id, &stream)) {
-                                    audio_player_play(stream.url, next_item->runtime_ticks);
+                                } else if (jfin_get_audio_stream(session, next_item->id, 0, &stream)) {
+                                    audio_player_play(stream.url, next_item->runtime_ticks, 0);
                                     started = true;
                                 }
                             } else {
-                                if (jfin_get_audio_stream(session, next_item->id, &stream)) {
-                                    audio_player_play(stream.url, next_item->runtime_ticks);
+                                if (jfin_get_audio_stream(session, next_item->id, 0, &stream)) {
+                                    audio_player_play(stream.url, next_item->runtime_ticks, 0);
                                     started = true;
                                 }
                             }
@@ -751,8 +776,8 @@ void ui_render_now_playing(const ui_state_t *state, const player_status_t *playe
     }
 
     /* Controls hint */
-    draw_text(60, 180, 0.5f, rgba(COLOR_TEXT_PRIMARY),
-              "A: Pause   X: Stop   B: Back");
+    draw_text(20, 180, 0.45f, rgba(COLOR_TEXT_PRIMARY),
+              "A:Pause X:Stop B:Back L/R:Seek 30s");
 }
 
 /* ── Main render dispatch ──────────────────────────────────────────── */

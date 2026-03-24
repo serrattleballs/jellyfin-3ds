@@ -348,13 +348,13 @@ void audio_player_cleanup(void)
     }
 }
 
-bool audio_player_play(const char *url, int64_t duration_ticks)
+bool audio_player_play(const char *url, int64_t duration_ticks, int64_t seek_offset_ticks)
 {
     audio_player_stop(); /* stop any current playback */
 
     snprintf(s_player.url, sizeof(s_player.url), "%s", url);
     s_player.duration_ticks = duration_ticks;
-    s_player.position_ticks = 0;
+    s_player.position_ticks = seek_offset_ticks;
     s_player.error_msg[0] = '\0';
     s_player.stop_requested = false;
     s_player.active_buf = 0;

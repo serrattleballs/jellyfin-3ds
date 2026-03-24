@@ -56,8 +56,9 @@ void video_player_cleanup(void);
 
 /**
  * Start video playback from a TS stream URL.
+ * seek_offset_ticks: position in the original media this stream starts from.
  */
-bool video_player_play(const char *url, int64_t duration_ticks);
+bool video_player_play(const char *url, int64_t duration_ticks, int64_t seek_offset_ticks);
 
 /**
  * Stop playback.

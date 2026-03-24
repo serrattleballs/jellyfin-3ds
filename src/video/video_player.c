@@ -69,6 +69,7 @@ static struct {
     /* Stream info */
     char            url[2048];
     int64_t         duration_ticks;
+    int64_t         seek_offset_ticks; /* added to stream PTS for correct position after seek */
     volatile int64_t position_ticks;
 
     /* Demuxer */
@@ -544,7 +545,7 @@ static void decode_thread_func(void *arg)
                 AVFormatContext *fmt = (AVFormatContext *)s_vp.demux.fmt_ctx;
                 AVRational tb = fmt->streams[s_vp.demux.video_stream_idx]->time_base;
                 video_pts = pkt->pts * (double)tb.num / (double)tb.den;
-                s_vp.position_ticks = (int64_t)(video_pts * 10000000.0);
+                s_vp.position_ticks = s_vp.seek_offset_ticks + (int64_t)(video_pts * 10000000.0);
             }
 
             if (got_frame) {
@@ -735,14 +736,15 @@ void video_player_cleanup(void)
     video_player_stop();
 }
 
-bool video_player_play(const char *url, int64_t duration_ticks)
+bool video_player_play(const char *url, int64_t duration_ticks, int64_t seek_offset_ticks)
 {
-    log_write("PLAY: starting video, url_len=%d", (int)strlen(url));
+    log_write("PLAY: starting video, url_len=%d seek=%lld", (int)strlen(url), (long long)seek_offset_ticks);
     video_player_stop();
 
     snprintf(s_vp.url, sizeof(s_vp.url), "%s", url);
     s_vp.duration_ticks = duration_ticks;
-    s_vp.position_ticks = 0;
+    s_vp.seek_offset_ticks = seek_offset_ticks;
+    s_vp.position_ticks = seek_offset_ticks;
     s_vp.error_msg[0] = '\0';
     s_vp.stop_requested = false;
     s_vp.state = VIDEO_LOADING;

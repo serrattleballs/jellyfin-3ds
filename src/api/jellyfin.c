@@ -482,16 +482,11 @@ bool jfin_search(const jfin_session_t *session, const char *query,
 }
 
 bool jfin_get_audio_stream(const jfin_session_t *session, const char *item_id,
-                           jfin_stream_t *out)
+                           int64_t start_ticks, jfin_stream_t *out)
 {
     memset(out, 0, sizeof(*out));
 
-    /*
-     * Use the /Audio/{id}/universal endpoint which handles transcoding
-     * negotiation automatically. Request MP3 for maximum compatibility
-     * with the 3DS's limited CPU.
-     */
-    snprintf(out->url, sizeof(out->url),
+    int len = snprintf(out->url, sizeof(out->url),
              "%s/Audio/%s/universal?UserId=%s&DeviceId=%s"
              "&MaxStreamingBitrate=128000"
              "&Container=mp3,opus,ogg,aac"
@@ -502,18 +497,22 @@ bool jfin_get_audio_stream(const jfin_session_t *session, const char *item_id,
              session->server_url, item_id, session->user_id,
              session->device_id, session->access_token);
 
+    if (start_ticks > 0 && len < (int)sizeof(out->url) - 40)
+        snprintf(out->url + len, sizeof(out->url) - len,
+                 "&startTimeTicks=%lld", (long long)start_ticks);
+
     snprintf(out->container, sizeof(out->container), "%s", "mp3");
-    out->is_transcoding = true; /* server decides; assume yes */
+    out->is_transcoding = true;
 
     return true;
 }
 
 bool jfin_get_video_stream(const jfin_session_t *session, const char *item_id,
-                           jfin_stream_t *out)
+                           int64_t start_ticks, jfin_stream_t *out)
 {
     memset(out, 0, sizeof(*out));
 
-    snprintf(out->url, sizeof(out->url),
+    int len = snprintf(out->url, sizeof(out->url),
              "%s/Videos/%s/stream?UserId=%s&DeviceId=%s"
              "&VideoCodec=h264"
              "&AudioCodec=aac"
@@ -530,6 +529,10 @@ bool jfin_get_video_stream(const jfin_session_t *session, const char *item_id,
              "&api_key=%s",
              session->server_url, item_id, session->user_id,
              session->device_id, item_id, session->access_token);
+
+    if (start_ticks > 0 && len < (int)sizeof(out->url) - 40)
+        snprintf(out->url + len, sizeof(out->url) - len,
+                 "&StartTimeTicks=%lld", (long long)start_ticks);
 
     snprintf(out->container, sizeof(out->container), "%s", "ts");
     out->is_transcoding = true;

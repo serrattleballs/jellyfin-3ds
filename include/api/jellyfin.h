@@ -150,18 +150,16 @@ bool jfin_search(const jfin_session_t *session, const char *query,
 /* ── Streaming ─────────────────────────────────────────────────────── */
 
 /**
- * Get an audio stream URL. The server will transcode if needed based
- * on the device profile we send (MP3 128kbps for Old 3DS compatibility).
+ * Get an audio stream URL. start_ticks = 0 for beginning, or seek position.
  */
 bool jfin_get_audio_stream(const jfin_session_t *session, const char *item_id,
-                           jfin_stream_t *out);
+                           int64_t start_ticks, jfin_stream_t *out);
 
 /**
- * Get a video stream URL. Requests H.264 baseline 400x240 transcoding
- * for 3DS playback. New 3DS can use hardware decode.
+ * Get a video stream URL. start_ticks = 0 for beginning, or seek position.
  */
 bool jfin_get_video_stream(const jfin_session_t *session, const char *item_id,
-                           jfin_stream_t *out);
+                           int64_t start_ticks, jfin_stream_t *out);
 
 
 /* ── Images ────────────────────────────────────────────────────────── */
