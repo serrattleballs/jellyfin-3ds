@@ -368,13 +368,16 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                 break;
             }
 
-            /* D-pad down: hide bottom screen (night mode) */
+            /* Watch mode: D-pad down hides controls, only up exits */
+            if (state->bottom_hidden) {
+                if (kdown & KEY_DUP)
+                    state->bottom_hidden = false;
+                break; /* ignore all other buttons in watch mode */
+            }
+            /* D-pad down: enter watch mode */
             if (kdown & KEY_DDOWN) {
                 state->bottom_hidden = true;
-            }
-            /* D-pad up: show bottom screen */
-            if (kdown & KEY_DUP) {
-                state->bottom_hidden = false;
+                break;
             }
             /* A to pause/resume */
             if (kdown & KEY_A) {
