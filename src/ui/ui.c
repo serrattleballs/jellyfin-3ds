@@ -197,8 +197,12 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                     if (is_video && video_player_is_supported()) {
                         /* Video playback on New 3DS */
                         audio_player_stop();
+                        /* Check for subtitles */
+                        state->subtitle_index = jfin_get_subtitle_index(session, item->id);
+                        state->subtitles_on = (state->subtitle_index >= 0);
+                        int sub_idx = state->subtitles_on ? state->subtitle_index : -1;
                         jfin_stream_t stream;
-                        if (jfin_get_video_stream(session, item->id, &stream) &&
+                        if (jfin_get_video_stream(session, item->id, sub_idx, &stream) &&
                             video_player_play(stream.url, item->runtime_ticks)) {
                             state->now_playing = *item;
                             state->has_now_playing = true;
@@ -320,7 +324,7 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                         jfin_stream_t stream;
                         bool started = false;
                         if (next_is_video && video_player_is_supported()) {
-                            if (jfin_get_video_stream(session, next_item->id, &stream) &&
+                            if (jfin_get_video_stream(session, next_item->id, state->subtitles_on ? state->subtitle_index : -1, &stream) &&
                                 video_player_play(stream.url, next_item->runtime_ticks)) {
                                 started = true;
                             } else if (jfin_get_audio_stream(session, next_item->id, &stream)) {
@@ -379,6 +383,16 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
             if (kdown & KEY_B) {
                 state->current_view = state->previous_view;
             }
+            /* Y to toggle subtitles (restarts stream) */
+            if ((kdown & KEY_Y) && vid_active && state->subtitle_index >= 0) {
+                state->subtitles_on = !state->subtitles_on;
+                int sub_idx = state->subtitles_on ? state->subtitle_index : -1;
+                jfin_stream_t stream;
+                if (jfin_get_video_stream(session, state->now_playing.id, sub_idx, &stream)) {
+                    video_player_stop();
+                    video_player_play(stream.url, state->now_playing.runtime_ticks);
+                }
+            }
             /* X to stop */
             if (kdown & KEY_X) {
                 video_player_stop();
@@ -406,7 +420,7 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                             jfin_stream_t stream;
                             bool started = false;
                             if (next_is_video && video_player_is_supported()) {
-                                if (jfin_get_video_stream(session, next_item->id, &stream) &&
+                                if (jfin_get_video_stream(session, next_item->id, state->subtitles_on ? state->subtitle_index : -1, &stream) &&
                                     video_player_play(stream.url, next_item->runtime_ticks)) {
                                     started = true;
                                 } else if (jfin_get_audio_stream(session, next_item->id, &stream)) {
@@ -750,8 +764,16 @@ void ui_render_now_playing(const ui_state_t *state, const player_status_t *playe
         draw_text(30, 125, 0.38f, rgba(COLOR_TEXT_SECONDARY), diag);
     }
 
-    /* Controls hint */
-    draw_text(60, 180, 0.5f, rgba(COLOR_TEXT_PRIMARY), "A: Pause   X: Stop   B: Back");
+    /* Subtitle indicator + controls */
+    if (is_video && state->subtitle_index >= 0) {
+        draw_text(20, 155, 0.4f, rgba(COLOR_TEXT_SECONDARY),
+                  state->subtitles_on ? "Subs: ON" : "Subs: OFF");
+        draw_text(30, 180, 0.45f, rgba(COLOR_TEXT_PRIMARY),
+                  "A:Pause X:Stop B:Back Y:Subs");
+    } else {
+        draw_text(60, 180, 0.5f, rgba(COLOR_TEXT_PRIMARY),
+                  "A: Pause   X: Stop   B: Back");
+    }
 }
 
 /* ── Main render dispatch ──────────────────────────────────────────── */
