@@ -17,6 +17,7 @@
 #include "api/jellyfin.h"
 #include "audio/player.h"
 #include "video/video_player.h"
+#include "ui/album_art.h"
 #include "util/config.h"
 
 extern jfin_config_t g_config;
@@ -207,6 +208,7 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                             state->previous_view = state->current_view;
                             state->current_view = VIEW_NOW_PLAYING;
                             jfin_report_start(session, item->id);
+                                album_art_load(session, item);
                         } else {
                             /* Video failed — fall back to audio */
                             if (jfin_get_audio_stream(session, item->id, 0, &stream)) {
@@ -216,6 +218,7 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                                 state->playing_index = state->selected_index;
                                 state->auto_stopped = false;
                                 jfin_report_start(session, item->id);
+                                album_art_load(session, item);
                             }
                         }
                     } else {
@@ -229,6 +232,7 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                             state->playing_index = state->selected_index;
                             state->auto_stopped = false;
                             jfin_report_start(session, item->id);
+                                album_art_load(session, item);
                         }
                     }
                 } else if (is_container) {
@@ -338,6 +342,7 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                             state->playing_index = next;
                             state->auto_stopped = false;
                             jfin_report_start(session, next_item->id);
+                            album_art_load(session, next_item);
                         } else {
                             state->has_now_playing = false;
                         }
@@ -462,6 +467,7 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                                 state->playing_index = next;
                                 state->auto_stopped = false;
                                 jfin_report_start(session, next_item->id);
+                            album_art_load(session, next_item);
                             } else {
                                 state->has_now_playing = false;
                                 state->current_view = state->previous_view;
@@ -711,8 +717,12 @@ void ui_render_now_playing(const ui_state_t *state, const player_status_t *playe
         /* Audio-only: show track info */
         const jfin_item_t *item = &state->now_playing;
 
+        /* Album art or placeholder */
         draw_rect(125, 20, 150, 150, rgba(COLOR_BG_CARD));
-        draw_text(165, 85, 0.6f, rgba(COLOR_TEXT_SECONDARY), "ART");
+        if (album_art_is_loaded())
+            album_art_draw(125, 20, 150);
+        else
+            draw_text(165, 85, 0.6f, rgba(COLOR_TEXT_SECONDARY), "ART");
 
         draw_text(50, 180, 0.6f, rgba(COLOR_TEXT_PRIMARY), item->name);
 
