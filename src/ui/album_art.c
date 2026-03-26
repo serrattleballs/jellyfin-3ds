@@ -60,26 +60,30 @@ static void upload_rgb565_art(const u16 *pixels, int w, int h)
     u8 *tex_data = (u8 *)s_art.tex.data;
     int tex_w = ART_TEX_SIZE;
 
-    /* Same precomputed-table tiling as video, but for small texture */
-    static const int inc_x[] = {4, 12, 4, 44, 4, 12, 4, 44, 4, 12, 4, 44, 4, 12, 4, 44,
-                                4, 12, 4, 44, 4, 12, 4, 44, 4, 12, 4, 44, 4, 12, 4, 44,
-                                4, 12, 4, 44, 4, 12, 4, 44, 4, 12, 4, 44, 4, 12, 4, 44,
-                                4, 12, 4, 44, 4, 12, 4, 44, 4, 12, 4, 44, 4, 12, 4, 44};
+    /* Precomputed Morton offset tables — values × pixel_size(2) */
+    static int inc_x[ART_TEX_SIZE];
     static int inc_y[ART_TEX_SIZE];
-    static bool inc_y_built = false;
+    static bool tables_built = false;
+    const int ps = 2; /* BGR565 = 2 bytes/pixel */
 
-    if (!inc_y_built) {
-        for (int i = 0; i + 7 < ART_TEX_SIZE; i += 8) {
-            inc_y[i]     = 4;
-            inc_y[i + 1] = 12;
-            inc_y[i + 2] = 4;
-            inc_y[i + 3] = 44;
-            inc_y[i + 4] = 4;
-            inc_y[i + 5] = 12;
-            inc_y[i + 6] = 4;
-            inc_y[i + 7] = (tex_w * 8 - 42) * 2;
+    if (!tables_built) {
+        for (int i = 0; i + 3 < ART_TEX_SIZE; i += 4) {
+            inc_x[i]     = 4 * ps;
+            inc_x[i + 1] = 12 * ps;
+            inc_x[i + 2] = 4 * ps;
+            inc_x[i + 3] = 44 * ps;
         }
-        inc_y_built = true;
+        for (int i = 0; i + 7 < ART_TEX_SIZE; i += 8) {
+            inc_y[i]     = 2 * ps;
+            inc_y[i + 1] = 6 * ps;
+            inc_y[i + 2] = 2 * ps;
+            inc_y[i + 3] = 22 * ps;
+            inc_y[i + 4] = 2 * ps;
+            inc_y[i + 5] = 6 * ps;
+            inc_y[i + 6] = 2 * ps;
+            inc_y[i + 7] = (tex_w * 8 - 42) * ps;
+        }
+        tables_built = true;
     }
 
     int dst_row = 0, y_count = 0;
