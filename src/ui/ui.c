@@ -247,13 +247,58 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
         if (kdown & KEY_B) {
             ui_navigate_back(state, session);
         }
-        /* Touch: tap on list items */
+        /* Touch: drag to scroll, tap to select */
         if (kdown & KEY_TOUCH) {
-            int tapped = state->scroll_offset + (touch.py / UI_LIST_ITEM_HEIGHT);
-            if (tapped < state->items.count) {
-                state->selected_index = tapped;
-                /* Double-tap could enter — for now just select */
+            state->touch_held = true;
+            state->touch_start_y = touch.py;
+            state->scroll_velocity = 0;
+        }
+        if (kheld & KEY_TOUCH) {
+            if (state->touch_held) {
+                int dy = state->touch_start_y - touch.py;
+                if (dy > 10 || dy < -10) {
+                    /* Dragging — scroll the list */
+                    int scroll_items = dy / UI_LIST_ITEM_HEIGHT;
+                    if (scroll_items != 0) {
+                        state->scroll_offset += scroll_items;
+                        state->touch_start_y = touch.py;
+                        state->scroll_velocity = scroll_items;
+                        /* Clamp scroll */
+                        int max_scroll = state->items.count - UI_MAX_VISIBLE_ITEMS;
+                        if (max_scroll < 0) max_scroll = 0;
+                        if (state->scroll_offset > max_scroll) state->scroll_offset = max_scroll;
+                        if (state->scroll_offset < 0) state->scroll_offset = 0;
+                        /* Keep selected_index in visible range */
+                        if (state->selected_index < state->scroll_offset)
+                            state->selected_index = state->scroll_offset;
+                        if (state->selected_index >= state->scroll_offset + UI_MAX_VISIBLE_ITEMS)
+                            state->selected_index = state->scroll_offset + UI_MAX_VISIBLE_ITEMS - 1;
+                    }
+                }
             }
+        }
+        if (!(kheld & KEY_TOUCH) && state->touch_held) {
+            /* Touch released */
+            state->touch_held = false;
+            if (state->scroll_velocity == 0) {
+                /* Was a tap, not a drag — select the tapped item */
+                int tapped = state->scroll_offset + (state->touch_start_y / UI_LIST_ITEM_HEIGHT);
+                if (tapped >= 0 && tapped < state->items.count)
+                    state->selected_index = tapped;
+            }
+            /* Momentum: apply remaining velocity over next frames */
+        }
+        /* Momentum scrolling (decelerates each frame) */
+        if (!state->touch_held && state->scroll_velocity != 0) {
+            state->scroll_offset += state->scroll_velocity;
+            /* Decelerate */
+            if (state->scroll_velocity > 0) state->scroll_velocity--;
+            else state->scroll_velocity++;
+            /* Clamp */
+            int max_scroll = state->items.count - UI_MAX_VISIBLE_ITEMS;
+            if (max_scroll < 0) max_scroll = 0;
+            if (state->scroll_offset > max_scroll) state->scroll_offset = max_scroll;
+            if (state->scroll_offset < 0) { state->scroll_offset = 0; state->scroll_velocity = 0; }
         }
         /* L/R for pagination */
         if (kdown & KEY_R) {
