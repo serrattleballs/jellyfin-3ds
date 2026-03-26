@@ -231,8 +231,10 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                             state->has_now_playing = true;
                             state->playing_index = state->selected_index;
                             state->auto_stopped = false;
+                            state->previous_view = state->current_view;
+                            state->current_view = VIEW_NOW_PLAYING;
                             jfin_report_start(session, item->id);
-                                album_art_load(session, item);
+                            album_art_load(session, item);
                         }
                     }
                 } else if (is_container) {
