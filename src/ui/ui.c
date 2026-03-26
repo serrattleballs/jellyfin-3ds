@@ -253,8 +253,11 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                     if (is_video && video_player_is_supported()) {
                         /* Video playback on New 3DS */
                         audio_player_stop();
+                        state->subtitle_index = jfin_get_subtitle_index(session, item->id);
+                        state->subtitles_on = false; /* off by default, Y to toggle */
+                        int sub = state->subtitles_on ? state->subtitle_index : -1;
                         jfin_stream_t stream;
-                        if (jfin_get_video_stream(session, item->id, 0, &stream) &&
+                        if (jfin_get_video_stream(session, item->id, 0, sub, &stream) &&
                             video_player_play(stream.url, item->runtime_ticks, 0)) {
                             state->now_playing = *item;
                             state->has_now_playing = true;
@@ -373,7 +376,7 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                         jfin_stream_t stream;
                         bool started = false;
                         if (next_is_video && video_player_is_supported()) {
-                            if (jfin_get_video_stream(session, next_item->id, 0, &stream) &&
+                            if (jfin_get_video_stream(session, next_item->id, 0, state->subtitles_on ? state->subtitle_index : -1, &stream) &&
                                 video_player_play(stream.url, next_item->runtime_ticks, 0)) {
                                 started = true;
                             } else if (jfin_get_audio_stream(session, next_item->id, 0, &stream)) {
@@ -440,6 +443,16 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                 else
                     audio_player_pause();
             }
+            /* Y to toggle subtitles (seeks to current position with/without subs) */
+            if ((kdown & KEY_Y) && vid_active && state->subtitle_index >= 0) {
+                state->subtitles_on = !state->subtitles_on;
+                int64_t cur_pos = vs.position_ticks;
+                int sub = state->subtitles_on ? state->subtitle_index : -1;
+                jfin_stream_t stream;
+                video_player_stop();
+                if (jfin_get_video_stream(session, state->now_playing.id, cur_pos, sub, &stream))
+                    video_player_play(stream.url, state->now_playing.runtime_ticks, cur_pos);
+            }
             /* L/R to seek ±30 seconds */
             if ((kdown & KEY_L) || (kdown & KEY_R)) {
                 int64_t offset = (kdown & KEY_R) ? 300000000LL : -300000000LL; /* ±30s */
@@ -457,7 +470,7 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                 jfin_stream_t stream;
                 if (vid_active) {
                     video_player_stop();
-                    if (jfin_get_video_stream(session, state->now_playing.id, new_pos, &stream))
+                    if (jfin_get_video_stream(session, state->now_playing.id, new_pos, state->subtitles_on ? state->subtitle_index : -1, &stream))
                         video_player_play(stream.url, state->now_playing.runtime_ticks, new_pos);
                 } else {
                     audio_player_stop();
@@ -498,7 +511,7 @@ void ui_update(ui_state_t *state, const jfin_session_t *session,
                             jfin_stream_t stream;
                             bool started = false;
                             if (next_is_video && video_player_is_supported()) {
-                                if (jfin_get_video_stream(session, next_item->id, 0, &stream) &&
+                                if (jfin_get_video_stream(session, next_item->id, 0, state->subtitles_on ? state->subtitle_index : -1, &stream) &&
                                     video_player_play(stream.url, next_item->runtime_ticks, 0)) {
                                     started = true;
                                 } else if (jfin_get_audio_stream(session, next_item->id, 0, &stream)) {
@@ -854,9 +867,15 @@ void ui_render_now_playing(const ui_state_t *state, const player_status_t *playe
         draw_text(30, 125, 0.38f, rgba(COLOR_TEXT_SECONDARY), diag);
     }
 
+    /* Subtitle indicator */
+    if (is_video && state->subtitle_index >= 0) {
+        draw_text(20, 155, 0.38f, rgba(COLOR_TEXT_SECONDARY),
+                  state->subtitles_on ? "Subs: ON (Y toggle)" : "Subs: OFF (Y toggle)");
+    }
+
     /* Controls hint */
     draw_text(20, 180, 0.45f, rgba(COLOR_TEXT_PRIMARY),
-              "A:Pause X:Stop B:Back L/R:Seek 30s");
+              "A:Pause X:Stop B:Back L/R:Seek");
 }
 
 /* ── Main render dispatch ──────────────────────────────────────────── */

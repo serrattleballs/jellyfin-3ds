@@ -510,7 +510,8 @@ bool jfin_get_audio_stream(const jfin_session_t *session, const char *item_id,
 }
 
 bool jfin_get_video_stream(const jfin_session_t *session, const char *item_id,
-                           int64_t start_ticks, jfin_stream_t *out)
+                           int64_t start_ticks, int subtitle_index,
+                           jfin_stream_t *out)
 {
     memset(out, 0, sizeof(*out));
 
@@ -547,10 +548,49 @@ bool jfin_get_video_stream(const jfin_session_t *session, const char *item_id,
                   (long long)start_ticks, (unsigned long)(tick & 0xFFFFFFFF));
     }
 
+    /* Subtitle burn-in */
+    if (subtitle_index >= 0) {
+        int cur = strlen(out->url);
+        if (cur < (int)sizeof(out->url) - 60)
+            snprintf(out->url + cur, sizeof(out->url) - cur,
+                     "&SubtitleStreamIndex=%d&SubtitleMethod=Encode", subtitle_index);
+    }
+
     snprintf(out->container, sizeof(out->container), "%s", "ts");
     out->is_transcoding = true;
 
     return true;
+}
+
+int jfin_get_subtitle_index(const jfin_session_t *session, const char *item_id)
+{
+    char url[JFIN_URL_BUF];
+    snprintf(url, sizeof(url), "%s/Users/%s/Items/%s?Fields=MediaSources",
+             session->server_url, session->user_id, item_id);
+
+    cJSON *json = api_get(session, url);
+    if (!json) return -1;
+
+    const cJSON *sources = cJSON_GetObjectItemCaseSensitive(json, "MediaSources");
+    if (cJSON_IsArray(sources) && cJSON_GetArraySize(sources) > 0) {
+        const cJSON *src0 = cJSON_GetArrayItem(sources, 0);
+        const cJSON *streams = cJSON_GetObjectItemCaseSensitive(src0, "MediaStreams");
+        if (cJSON_IsArray(streams)) {
+            int count = cJSON_GetArraySize(streams);
+            for (int i = 0; i < count; i++) {
+                const cJSON *stream = cJSON_GetArrayItem(streams, i);
+                const cJSON *type = cJSON_GetObjectItemCaseSensitive(stream, "Type");
+                if (cJSON_IsString(type) && strcmp(type->valuestring, "Subtitle") == 0) {
+                    int idx = json_get_int(stream, "Index", -1);
+                    cJSON_Delete(json);
+                    return idx;
+                }
+            }
+        }
+    }
+
+    cJSON_Delete(json);
+    return -1;
 }
 
 void jfin_get_image_url_for_item(const jfin_session_t *session,
