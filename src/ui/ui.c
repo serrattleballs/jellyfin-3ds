@@ -19,6 +19,7 @@
 #include "video/video_player.h"
 #include "ui/album_art.h"
 #include "util/config.h"
+#include "util/log.h"
 
 extern jfin_config_t g_config;
 
@@ -569,8 +570,12 @@ void ui_navigate_into(ui_state_t *state, const jfin_session_t *session,
     /* Fetch into state->items directly (no stack-heavy temp copy) */
     jfin_get_items(session, saved_id, 0, JFIN_MAX_ITEMS, &state->items);
 
+    log_write("NAV: into '%s' id=%s depth=%d items=%d",
+              saved_name, saved_id, state->parent_depth, state->items.count);
+
     if (state->items.count == 0) {
         /* Empty folder — undo navigation */
+        log_write("NAV: empty, undoing");
         state->parent_depth--;
         ui_navigate_back(state, session);
     }

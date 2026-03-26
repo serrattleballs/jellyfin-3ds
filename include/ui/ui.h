@@ -25,7 +25,7 @@ extern "C" {
 #define BOTTOM_SCREEN_HEIGHT 240
 
 #define UI_LIST_ITEM_HEIGHT  40
-#define UI_MAX_VISIBLE_ITEMS  6  /* 240 / 40 = 6 items on bottom screen */
+#define UI_MAX_VISIBLE_ITEMS  5  /* (240 - 30 header - 20 footer) / 40 ≈ 5 */
 #define UI_FONT_SIZE         14
 #define UI_FONT_SIZE_SMALL   11
 

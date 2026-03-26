@@ -514,6 +514,8 @@ bool jfin_get_video_stream(const jfin_session_t *session, const char *item_id,
 {
     memset(out, 0, sizeof(*out));
 
+    /* Unique PlaySessionId per request prevents stale transcode conflicts */
+    u64 tick = svcGetSystemTick();
     int len = snprintf(out->url, sizeof(out->url),
              "%s/Videos/%s/stream?UserId=%s&DeviceId=%s"
              "&VideoCodec=h264"
@@ -528,9 +530,11 @@ bool jfin_get_video_stream(const jfin_session_t *session, const char *item_id,
              "&Level=31"
              "&MaxRefFrames=4"
              "&MediaSourceId=%s"
+             "&PlaySessionId=3ds%08lx"
              "&api_key=%s",
              session->server_url, item_id, session->user_id,
-             session->device_id, item_id, session->access_token);
+             session->device_id, item_id,
+             (unsigned long)(tick & 0xFFFFFFFF), session->access_token);
 
     if (start_ticks > 0 && len < (int)sizeof(out->url) - 80) {
         /* Cache-buster: Jellyfin caches transcodes per item+device.
