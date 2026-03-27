@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./deploy.sh <3DS_IP>
-#   ./deploy.sh 10.89.97.XXX
+#   ./deploy.sh <3DS_IP>
 #
 # Prerequisites:
 #   - 3DS with Luma3DS CFW

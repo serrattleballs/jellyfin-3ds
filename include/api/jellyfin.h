@@ -69,7 +69,7 @@ typedef struct {
 } jfin_stream_t;
 
 typedef struct {
-    char server_url[JFIN_MAX_URL];   /* e.g. "http://10.89.97.220:8096" */
+    char server_url[JFIN_MAX_URL];   /* e.g. "http://your-server:8096" */
     char access_token[JFIN_MAX_TOKEN];
     char user_id[JFIN_MAX_ID];
     char device_id[JFIN_MAX_ID];

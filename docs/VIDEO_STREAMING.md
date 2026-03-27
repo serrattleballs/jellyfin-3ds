@@ -142,7 +142,7 @@ include/video/
 
 ### Verified Configuration
 
-Tested against Jellyfin 10.11.5 at `http://10.89.97.97:8096` with "2001: A Space Odyssey" (HEVC Main 10, HDR10, 1920x872, MKV).
+Tested against Jellyfin 10.11.5 at `http://your-jellyfin-server:8096` with "2001: A Space Odyssey" (HEVC Main 10, HDR10, 1920x872, MKV).
 
 **Server output:** H.264 Constrained Baseline, Level 3.1, 400xN (aspect-corrected), 0 B-frames, 1 ref frame, yuv420p 8-bit, AAC-LC stereo 48kHz 128kbps.
 
