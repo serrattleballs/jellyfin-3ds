@@ -71,8 +71,6 @@ typedef struct {
     bool         auto_advance;    /* auto-play next track/episode when current finishes */
     bool         auto_stopped;    /* true when user manually stopped (X), false on natural end */
     bool         bottom_hidden;   /* hide bottom screen (night mode) */
-    int          subtitle_index;  /* -1 = no subs available, >= 0 = track index */
-    bool         subtitles_on;    /* user toggle */
 
     /* Login form */
     char         server_url[JFIN_MAX_URL];

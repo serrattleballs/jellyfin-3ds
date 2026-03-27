@@ -17,3 +17,5 @@ compile_commands.json
 # FFmpeg pre-built static libraries (built via lib/ffmpeg/build-ffmpeg.sh)
 lib/ffmpeg/*.a
 lib/ffmpeg/include/
+*.bnr
+*.cia

@@ -159,10 +159,9 @@ bool jfin_get_audio_stream(const jfin_session_t *session, const char *item_id,
  * Get a video stream URL. start_ticks = 0 for beginning, or seek position.
  */
 bool jfin_get_video_stream(const jfin_session_t *session, const char *item_id,
-                           int64_t start_ticks, int subtitle_index,
+                           int64_t start_ticks,
                            jfin_stream_t *out);
 
-int jfin_get_subtitle_index(const jfin_session_t *session, const char *item_id);
 
 
 /* ── Images ────────────────────────────────────────────────────────── */
