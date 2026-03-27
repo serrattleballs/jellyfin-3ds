@@ -118,7 +118,3 @@ Built with reference to:
 - [ThirdTube](https://github.com/windows-server-2003/ThirdTube) — video architecture
 - [Switchfin](https://github.com/dragonflylee/switchfin) — Jellyfin API patterns
 - [Video player for 3DS](https://github.com/Core-2-Extreme/Video_player_for_3DS) — MVD decoder usage
-
-## License
-
-MIT
