@@ -25,25 +25,27 @@ static int ring_read_for_avio(void *opaque, uint8_t *buf, int buf_size)
 
     /* Wait for data (block with sleep, not spin) */
     int waited = 0;
-    while (ctx->ring_fill < buf_size && !ctx->ring_finished) {
+    while (__atomic_load_n(&ctx->ring_fill, __ATOMIC_ACQUIRE) < buf_size
+           && !__atomic_load_n(&ctx->ring_finished, __ATOMIC_ACQUIRE)) {
         if (waited > 5000) /* 5 seconds timeout */
             return AVERROR_EOF;
         svcSleepThread(1000000LL); /* 1ms */
         waited++;
     }
 
-    int avail = ctx->ring_fill;
-    if (avail == 0 && ctx->ring_finished)
+    int avail = __atomic_load_n(&ctx->ring_fill, __ATOMIC_ACQUIRE);
+    if (avail == 0 && __atomic_load_n(&ctx->ring_finished, __ATOMIC_ACQUIRE))
         return AVERROR_EOF;
 
     int to_read = (buf_size < avail) ? buf_size : avail;
+    if (to_read > ctx->ring_size) to_read = ctx->ring_size; /* defensive */
 
     /* Copy from ring buffer */
     for (int i = 0; i < to_read; i++) {
         buf[i] = ctx->ring_data[ctx->ring_read_pos];
         ctx->ring_read_pos = (ctx->ring_read_pos + 1) % ctx->ring_size;
     }
-    ctx->ring_fill -= to_read;
+    __atomic_fetch_sub(&ctx->ring_fill, to_read, __ATOMIC_RELEASE);
 
     return to_read;
 }

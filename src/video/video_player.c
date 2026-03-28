@@ -249,7 +249,8 @@ static size_t net_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
 
     size_t written = 0;
     while (written < total && !s_vp.stop_requested) {
-        int space = demux->ring_size - demux->ring_fill;
+        int fill = __atomic_load_n(&demux->ring_fill, __ATOMIC_ACQUIRE);
+        int space = demux->ring_size - fill;
         int chunk = (int)((total - written) < (size_t)space ? (total - written) : (size_t)space);
 
         if (chunk <= 0) {
@@ -261,7 +262,7 @@ static size_t net_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
             demux->ring_data[demux->ring_write_pos] = ((uint8_t *)ptr)[written + i];
             demux->ring_write_pos = (demux->ring_write_pos + 1) % demux->ring_size;
         }
-        demux->ring_fill += chunk;
+        __atomic_fetch_add(&demux->ring_fill, chunk, __ATOMIC_RELEASE);
         written += chunk;
     }
 
@@ -295,7 +296,8 @@ static void net_thread_func(void *arg)
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     log_write("NET: curl done, result=%d (%s), http=%ld, ring_fill=%d",
-              res, curl_easy_strerror(res), http_code, s_vp.demux.ring_fill);
+              res, curl_easy_strerror(res), http_code,
+              __atomic_load_n(&s_vp.demux.ring_fill, __ATOMIC_ACQUIRE));
 
     if (res != CURLE_OK && !s_vp.stop_requested) {
         snprintf(s_vp.error_msg, sizeof(s_vp.error_msg),
@@ -303,7 +305,7 @@ static void net_thread_func(void *arg)
         s_vp.state = VIDEO_ERROR;
     }
 
-    s_vp.demux.ring_finished = true;
+    __atomic_store_n(&s_vp.demux.ring_finished, true, __ATOMIC_RELEASE);
     curl_easy_cleanup(curl);
 }
 
@@ -473,13 +475,16 @@ static void decode_thread_func(void *arg)
 
     /* Wait for prefetch */
     while (!s_vp.stop_requested) {
-        if (s_vp.demux.ring_fill >= PREFETCH_BYTES || s_vp.demux.ring_finished)
+        if (__atomic_load_n(&s_vp.demux.ring_fill, __ATOMIC_ACQUIRE) >= PREFETCH_BYTES
+            || __atomic_load_n(&s_vp.demux.ring_finished, __ATOMIC_ACQUIRE))
             break;
         svcSleepThread(10000000LL); /* 10ms */
     }
     if (s_vp.stop_requested) { log_write("DEC: stop during prefetch"); return; }
 
-    log_write("DEC: prefetch done, fill=%d finished=%d", s_vp.demux.ring_fill, s_vp.demux.ring_finished);
+    log_write("DEC: prefetch done, fill=%d finished=%d",
+              __atomic_load_n(&s_vp.demux.ring_fill, __ATOMIC_ACQUIRE),
+              __atomic_load_n(&s_vp.demux.ring_finished, __ATOMIC_ACQUIRE));
 
     /* Init demuxer */
     if (!demux_init(&s_vp.demux)) {
@@ -878,7 +883,7 @@ video_status_t video_player_get_status(void)
     st.position_ticks = s_vp.position_ticks;
     st.duration_ticks = s_vp.duration_ticks;
     st.buffer_percent = (s_vp.demux.ring_size > 0)
-        ? (s_vp.demux.ring_fill * 100 / s_vp.demux.ring_size) : 0;
+        ? (__atomic_load_n(&s_vp.demux.ring_fill, __ATOMIC_RELAXED) * 100 / s_vp.demux.ring_size) : 0;
     st.video_width = s_vp.display_width;
     st.video_height = s_vp.display_height;
     /* Compute FPS every second */

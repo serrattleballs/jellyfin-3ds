@@ -207,6 +207,13 @@ bool mvd_decode_packet(mvd_ctx_t *ctx, const uint8_t *data, int size)
     if (dst_off == 0)
         return false;
 
+    /* Sanity check: reject obviously corrupt NAL data before feeding MVD.
+     * MVD operates via DMA — corrupt input can crash the entire system. */
+    if (dst_off < 5) {
+        log_write("MVD: NAL too small (%d bytes), skipping", dst_off);
+        return false;
+    }
+
     /* Set output config for the current write buffer */
     MVDSTD_Config config;
     mvdstdGenerateDefaultConfig(&config,
